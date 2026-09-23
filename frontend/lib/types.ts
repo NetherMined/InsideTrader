@@ -89,6 +89,7 @@ export interface BotStatus {
   loss_count: number;
   defensive_mode?: boolean;
   started_with_usdt?: number;
+  futures_usdt?: number;
 }
 
 export interface Goal {

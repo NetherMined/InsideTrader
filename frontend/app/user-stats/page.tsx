@@ -124,13 +124,14 @@ export default function UserStatsPage() {
   }, []);
 
   const freeCapital = status?.capital_usdt ?? 0;
+  const futuresBalance = status?.futures_usdt ?? 0;
   const openPositions = status?.open_trades ?? 0;
 
   const positionsValue = positions.reduce(
     (sum, p) => sum + (p.entry_price * p.quantity) / p.leverage + (p.unrealized_pnl ?? 0),
     0
   );
-  const totalPortfolio = freeCapital + positionsValue;
+  const totalPortfolio = freeCapital + futuresBalance + positionsValue;
 
   const netRealizedProfit = (allTime?.total_profit_usdt ?? 0) + (allTime?.total_loss_usdt ?? 0);
   const portfolioGainPct = startingCapital > 0 ? ((totalPortfolio - startingCapital) / startingCapital) * 100 : 0;
@@ -200,9 +201,15 @@ export default function UserStatsPage() {
             <div className="text-lg font-bold" style={{ color: '#e8e8e8' }}>{display(totalPortfolio)}</div>
           </div>
           <div>
-            <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Available</div>
+            <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Spot</div>
             <div className="text-lg font-bold" style={{ color: '#e8e8e8' }}>{display(freeCapital)}</div>
           </div>
+          {futuresBalance > 0 && (
+            <div>
+              <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Futures</div>
+              <div className="text-lg font-bold" style={{ color: '#e8e8e8' }}>{display(futuresBalance)}</div>
+            </div>
+          )}
           <div className="ml-auto text-right">
             <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Total profit made</div>
             <div

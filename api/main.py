@@ -488,6 +488,7 @@ class BotStatusResponse(BaseModel):
     loss_count: int
     defensive_mode: bool = False
     started_with_usdt: float = 0.0
+    futures_usdt: float = 0.0
 
 
 @app.get("/api/v1/positions", response_model=list[PositionResponse])
@@ -617,6 +618,20 @@ async def get_bot_status():
             start_raw = await redis.get("bot:session_start_capital")
         started_with_usdt = float(start_raw) if start_raw else capital
 
+        futures_usdt = 0.0
+        if not is_paper:
+            try:
+                testnet_raw = await redis.get(_LIVE_MODE_KEYS["use_testnet"])
+                use_testnet = (testnet_raw == "true") if testnet_raw is not None else settings.use_testnet
+                fex = _get_futures_exchange(use_testnet)
+                try:
+                    fbal = await fex.fetch_balance()
+                    futures_usdt = float(fbal.get("USDT", {}).get("free", 0.0))
+                finally:
+                    await fex.close()
+            except Exception:
+                pass
+
         return BotStatusResponse(
             state=state_data.get("state", "unknown"),
             daily_pnl_pct=daily_pnl,
@@ -635,6 +650,7 @@ async def get_bot_status():
             loss_count=pnl_summary["loss_count"],
             defensive_mode=defensive,
             started_with_usdt=round(started_with_usdt, 2),
+            futures_usdt=round(futures_usdt, 2),
         )
     finally:
         await redis.aclose()
@@ -1060,6 +1076,20 @@ def _get_exchange(use_testnet: bool | None = None):
         "apiKey": api_key,
         "secret": api_secret,
         "options": {"defaultType": "spot"},
+    })
+    if testnet:
+        ex.set_sandbox_mode(True)
+    return ex
+
+
+def _get_futures_exchange(use_testnet: bool | None = None):
+    testnet = use_testnet if use_testnet is not None else settings.use_testnet
+    api_key = settings.binance_testnet_api_key if testnet else settings.binance_api_key
+    api_secret = settings.binance_testnet_api_secret if testnet else settings.binance_api_secret
+    ex = ccxt.binance({
+        "apiKey": api_key,
+        "secret": api_secret,
+        "options": {"defaultType": "future"},
     })
     if testnet:
         ex.set_sandbox_mode(True)
