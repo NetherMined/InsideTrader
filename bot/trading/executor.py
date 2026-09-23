@@ -565,11 +565,23 @@ async def _try_open_trade(
     fill_price = result.get("fill_price") or current_price
     order_id = result.get("order_id")
 
+    entry_indicators = {
+        "adx": round(pair.adx, 2),
+        "atr_pct": round(pair.atr_pct, 4),
+        "rsi": round(pair.rsi, 2),
+        "bb_pct": round(pair.bb_pct, 4),
+        "confidence": round(pair.confidence, 4),
+        "predicted_change_pct": round(pair.predicted_change_pct, 4),
+        "regime": regime_result.regime if regime_result else "UNKNOWN",
+        "funding_rate": round(pair.funding_rate, 6) if pair.funding_rate else 0.0,
+    }
     await open_position(
         symbol=symbol, side=side, mode=mode,
         entry_price=fill_price, quantity=quantity,
         stop_loss_price=stop_loss, take_profit_price=take_profit,
         leverage=leverage, paper_trade=paper, binance_order_id=order_id,
+        regime=regime_result.regime if regime_result else "UNKNOWN",
+        entry_indicators=entry_indicators,
     )
     await risk.on_trade_opened()
     await ev.publish_trade_opened(redis, symbol, side, mode, fill_price, quantity, paper)
