@@ -156,16 +156,29 @@ async def main() -> None:
     except Exception as corr_err:
         logger.warning(f"Initial correlation matrix failed: {corr_err}")
 
+    async def _guarded(name: str, coro):
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Task '{name}' crashed: {exc}")
+            stop_event.set()
+
+    tasks = [
+        asyncio.create_task(_guarded("trading_engine", run_trading_engine(ranked_store, redis, stop_event))),
+        asyncio.create_task(_guarded("price_stream", poll_prices(pairs, stop_event))),
+        asyncio.create_task(_guarded("hourly_refresh", hourly_refresh(pairs, redis, stop_event, ranked_store))),
+        asyncio.create_task(_guarded("periodic_retrain", periodic_retrain(pairs, stop_event))),
+    ]
     try:
-        await asyncio.gather(
-            run_trading_engine(ranked_store, redis, stop_event),
-            poll_prices(pairs, stop_event),
-            hourly_refresh(pairs, redis, stop_event, ranked_store),
-            periodic_retrain(pairs, stop_event),
-        )
-    except KeyboardInterrupt:
+        await asyncio.gather(*tasks)
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutdown signal received")
         stop_event.set()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         await redis.aclose()
 

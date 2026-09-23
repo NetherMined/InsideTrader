@@ -581,28 +581,31 @@ export default function SettingsPage() {
                 placeholder="1000"
                 value={capitalInput}
                 onChange={(e) => setCapitalInput(e.target.value)}
+                onBlur={() => {
+                  const raw = parseFloat(capitalInput.replace(',', '.'));
+                  if (!isNaN(raw) && raw > 0 && capital !== null && raw !== capital) {
+                    setSavingCapital(true);
+                    api.setCapital(raw).then(() => {
+                      setCapital(raw);
+                      showToast(`Capital updated to ${raw.toFixed(2)} USDT`);
+                    }).catch(() => {
+                      showToast('Failed to update capital');
+                      setCapitalInput(capital.toFixed(2));
+                    }).finally(() => setSavingCapital(false));
+                  }
+                }}
                 className="flex-1 text-xs px-3 py-2 rounded-lg"
                 style={{
                   background: '#0d0d0d',
-                  border: '1px solid #2a2a2a',
+                  border: `1px solid ${savingCapital ? 'rgba(240,185,11,0.4)' : '#2a2a2a'}`,
                   color: '#eaecef',
                   outline: 'none',
                 }}
               />
             </div>
-            <button
-              onClick={() => setShowRestartModal(true)}
-              disabled={!capitalChanged || savingCapital}
-              className="px-3 py-2 rounded-lg text-xs font-medium disabled:opacity-40"
-              style={{
-                background: capitalChanged ? 'rgba(246,70,93,0.15)' : '#1a1a1a',
-                color: capitalChanged ? '#f6465d' : '#555',
-                border: `1px solid ${capitalChanged ? 'rgba(246,70,93,0.3)' : '#2a2a2a'}`,
-                cursor: capitalChanged ? 'pointer' : 'not-allowed',
-              }}
-            >
-              {savingCapital ? 'Restarting...' : 'Restart Bot'}
-            </button>
+            {savingCapital && (
+              <span className="text-xs" style={{ color: '#f0b90b' }}>Saving...</span>
+            )}
           </div>
           {capital !== null && (
             <div className="text-xs px-3 py-2 rounded-lg" style={{ background: 'rgba(14,203,129,0.06)', color: '#848e9c' }}>

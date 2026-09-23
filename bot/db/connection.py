@@ -10,6 +10,7 @@ engine = create_async_engine(
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,
+    pool_recycle=1800,
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -51,6 +52,20 @@ async def init_db() -> None:
                 ADD COLUMN IF NOT EXISTS regime VARCHAR(20) DEFAULT 'UNKNOWN';
         """))
     logger.info("Database schema migration applied")
+
+    # Create performance indexes (idempotent — one statement per execute for asyncpg compatibility)
+    _indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_positions_trade_id ON positions (trade_id)",
+        "CREATE INDEX IF NOT EXISTS idx_positions_opened_at ON positions (opened_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades (symbol, status)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_opened_at ON trades (opened_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf_time ON candles (symbol, timeframe, open_time DESC)",
+    ]
+    async with engine.begin() as conn:
+        for idx_sql in _indexes:
+            await conn.execute(text(idx_sql))
+    logger.info("Database indexes verified")
+
 
 
 async def check_db() -> bool:

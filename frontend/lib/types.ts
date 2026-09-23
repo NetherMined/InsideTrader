@@ -175,6 +175,27 @@ export interface LiveMode {
   use_testnet: boolean;
 }
 
+export interface StartupStatus {
+  state: string;
+  awaiting_confirmation: boolean;
+  data_feed_active: boolean;
+  price_feeds_count: number;
+  paper_mode: boolean;
+  live_enabled: boolean;
+  use_testnet: boolean;
+  capital_usdt: number;
+  settings: {
+    trading_mode: string;
+    max_concurrent_trades: number;
+    confidence_threshold: number;
+    stop_loss_percent: number;
+    take_profit_percent: number;
+    daily_loss_limit_percent: number;
+    futures_leverage: number;
+    min_daily_trades: number;
+  };
+}
+
 export interface MarketSentiment {
   sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   strength: string;

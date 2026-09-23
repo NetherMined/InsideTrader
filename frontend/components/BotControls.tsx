@@ -1,17 +1,29 @@
 'use client';
 
-import { useState } from 'react';
-import { Play, Pause, Square, AlertTriangle, RotateCcw } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Play, Pause, Square, AlertTriangle, RotateCcw, CheckCircle } from 'lucide-react';
 import { api } from '@/lib/api';
 import type { BotStatus } from '@/lib/types';
 
 interface Props {
   status: BotStatus | null;
   onUpdate: () => void;
+  onRequestStartup?: () => void;
 }
 
-export function BotControls({ status, onUpdate }: Props) {
+export function BotControls({ status, onUpdate, onRequestStartup }: Props) {
   const [loading, setLoading] = useState(false);
+  const [allChecksPass, setAllChecksPass] = useState(false);
+
+  useEffect(() => {
+    if (status?.state === 'awaiting_confirmation') {
+      api.startupStatus().then((s) => {
+        setAllChecksPass(s.data_feed_active && s.capital_usdt > 0);
+      }).catch(() => setAllChecksPass(false));
+    } else {
+      setAllChecksPass(false);
+    }
+  }, [status?.state]);
 
   const send = async (cmd: 'stop' | 'pause' | 'resume') => {
     setLoading(true);
@@ -23,6 +35,26 @@ export function BotControls({ status, onUpdate }: Props) {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleStart = async () => {
+    if (status?.state === 'awaiting_confirmation') {
+      if (allChecksPass && onRequestStartup) {
+        onRequestStartup();
+      } else if (allChecksPass) {
+        setLoading(true);
+        try {
+          await api.confirmStartup();
+          setTimeout(onUpdate, 800);
+        } catch (e) {
+          console.error(e);
+        } finally {
+          setLoading(false);
+        }
+      }
+      return;
+    }
+    await send('resume');
   };
 
   const resetKillSwitch = async () => {
@@ -41,6 +73,7 @@ export function BotControls({ status, onUpdate }: Props) {
   const running = state === 'running';
   const paused = state === 'paused';
   const stopped = state === 'stopped' || state === 'unknown';
+  const awaiting = state === 'awaiting_confirmation';
   const defensive = state === 'defensive' || status?.defensive_mode;
   const killSwitch = state === 'kill_switch' || (status?.kill_switch && !defensive);
 
@@ -69,15 +102,18 @@ export function BotControls({ status, onUpdate }: Props) {
         </div>
       )}
 
-      {!running && !killSwitch && (
+      {(!running && !killSwitch) && (
         <button
-          onClick={() => send('resume')}
-          disabled={loading}
+          onClick={handleStart}
+          disabled={loading || (awaiting && !allChecksPass)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-opacity disabled:opacity-50"
           style={{ background: 'rgba(14,203,129,0.15)', color: '#0ecb81' }}
         >
+          {awaiting && allChecksPass && (
+            <CheckCircle size={13} style={{ color: '#0ecb81' }} />
+          )}
           <Play size={13} />
-          {stopped ? 'Start' : 'Resume'}
+          {awaiting ? 'Start Trading' : stopped ? 'Start' : 'Resume'}
         </button>
       )}
 
@@ -113,6 +149,7 @@ export function BotControls({ status, onUpdate }: Props) {
 function StateBadge({ state, paper }: { state: string; paper: boolean }) {
   const cfg: Record<string, { bg: string; color: string; label: string }> = {
     running: { bg: 'rgba(14,203,129,0.12)', color: '#0ecb81', label: 'RUNNING' },
+    awaiting_confirmation: { bg: 'rgba(240,185,11,0.12)', color: '#f0b90b', label: 'READY' },
     paused: { bg: 'rgba(240,185,11,0.12)', color: '#f0b90b', label: 'PAUSED' },
     stopped: { bg: 'rgba(132,142,156,0.12)', color: '#848e9c', label: 'STOPPED' },
     defensive: { bg: 'rgba(240,185,11,0.12)', color: '#f0b90b', label: 'DEFENSIVE' },

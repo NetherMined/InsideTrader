@@ -8,6 +8,7 @@ import { fmt, fmtPct, fmtPrice } from '@/lib/utils';
 import type { BotStatus, Position, LivePrice, Candle, PnlPeriodStats, MarketSentiment } from '@/lib/types';
 import { useCurrency } from '@/lib/currency';
 import { ExternalLink } from 'lucide-react';
+import { StartupModal } from '@/components/StartupModal';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
 function StatCard({
@@ -347,6 +348,12 @@ export default function DashboardPage() {
     loadStatus();
     loadPositions();
 
+    if (!startupDismissed) {
+      api.startupStatus().then((s) => {
+        if (s.awaiting_confirmation) setShowStartupModal(true);
+      }).catch(() => null);
+    }
+
     api.getTradeLimits().catch(() => null).then((limits) => {
       if (limits) setEffectiveMinTrades(limits.min_concurrent_trades);
     });
@@ -380,6 +387,9 @@ export default function DashboardPage() {
     await api.setGoalEnabled(newVal).catch(() => null);
   };
 
+  const [startupDismissed, setStartupDismissed] = useState(false);
+  const [showStartupModal, setShowStartupModal] = useState(false);
+
   const freeCapital = status?.capital_usdt ?? 0;
   const totalPortfolio =
     freeCapital +
@@ -390,6 +400,12 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6 space-y-6">
+      {showStartupModal && (
+        <StartupModal
+          onConfirmed={() => { setShowStartupModal(false); setStartupDismissed(true); loadStatus(); }}
+          onClose={() => { setShowStartupModal(false); setStartupDismissed(true); }}
+        />
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-bold">Dashboard</h1>
@@ -397,7 +413,11 @@ export default function DashboardPage() {
             Live overview of bot performance
           </p>
         </div>
-        <BotControls status={status} onUpdate={loadStatus} />
+        <BotControls
+          status={status}
+          onUpdate={loadStatus}
+          onRequestStartup={() => setShowStartupModal(true)}
+        />
       </div>
 
       <MarketBanner />

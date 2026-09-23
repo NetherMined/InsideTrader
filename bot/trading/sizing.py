@@ -10,7 +10,7 @@ Determines how much capital to allocate per trade, respecting:
 from loguru import logger
 from bot.config import settings
 
-MIN_NOTIONAL_USDT = 2.0
+MIN_NOTIONAL_USDT = 10.0
 
 
 def calculate_position_size(
@@ -47,10 +47,16 @@ def calculate_position_size(
         notional = margin * _leverage
 
     if notional < MIN_NOTIONAL_USDT:
-        logger.debug(
-            f"Position too small: ${notional:.2f} < ${MIN_NOTIONAL_USDT} minimum"
-        )
-        return 0.0, 0.0
+        # Bump up to minimum rather than rejecting — ensures trades open even when
+        # risk_pct formula gives a tiny slice (e.g. 100 trades / $189 capital = $1.89)
+        floored = min(MIN_NOTIONAL_USDT, available if mode == "SPOT" else capital_usdt * 0.15)
+        if floored < MIN_NOTIONAL_USDT:
+            logger.warning(
+                f"Insufficient capital for minimum position: ${available:.2f} available, ${MIN_NOTIONAL_USDT} minimum"
+            )
+            return 0.0, 0.0
+        logger.debug(f"Position bumped from ${notional:.2f} to minimum ${floored:.2f}")
+        notional = floored
 
     quantity = notional / price
     return round(quantity, 8), round(notional, 4)

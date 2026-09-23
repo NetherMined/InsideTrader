@@ -154,11 +154,23 @@ async def _get_trading_mode_flags(redis: aioredis.Redis) -> dict:
     }
 
 
-async def _get_live_price(symbol: str, redis: aioredis.Redis) -> float | None:
-    raw = await redis.get(f"price:{symbol}")
+async def _get_live_price(symbol: str, redis: aioredis.Redis, max_age_seconds: int = 30) -> float | None:
+    try:
+        raw = await redis.get(f"price:{symbol}")
+    except Exception:
+        raw = None
     if raw:
-        data = json.loads(raw)
-        return float(data["price"])
+        try:
+            data = json.loads(raw)
+            ts = data.get("ts")
+            if ts:
+                age = datetime.now(timezone.utc).timestamp() - datetime.fromisoformat(ts).timestamp()
+                if age > max_age_seconds:
+                    logger.debug(f"{symbol}: cached price is {age:.0f}s old, fetching fresh")
+                    return await get_current_price(symbol)
+            return float(data["price"])
+        except Exception:
+            pass
     return await get_current_price(symbol)
 
 
@@ -180,14 +192,15 @@ async def _get_market_sentiment(redis: aioredis.Redis) -> tuple[str, float]:
     return "NEUTRAL", 0.5
 
 
-async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, params: dict, use_testnet: bool | None = None) -> None:
+async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, params: dict, use_testnet: bool | None = None, capital: float = 0.0) -> None:
     positions = await get_open_positions()
 
     for pos in positions:
         symbol = pos["symbol"]
         current_price = await _get_live_price(symbol, redis)
         if current_price is None:
-            continue
+            logger.warning(f"{symbol}: price fetch failed, using entry price as fallback")
+            current_price = float(pos["entry_price"])
 
         entry_price = float(pos["entry_price"])
         quantity = float(pos["quantity"])
@@ -208,7 +221,10 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         notional = quantity * entry_price
         pnl_usdt = notional * effective_pnl_pct / 100
 
-        await update_position_price(pos_id, current_price, pnl_usdt)
+        try:
+            await update_position_price(pos_id, current_price, pnl_usdt)
+        except Exception as e:
+            logger.error(f"Failed to update position {pos_id} price: {e}")
 
         recovery_key = "bot:recovery_mode"
         in_recovery_raw = await redis.sismember(recovery_key, str(pos_id))
@@ -265,7 +281,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             await redis.srem(recovery_key, str(pos_id))
 
             # Estimate and record fee for this trade
-            estimated_fee = abs(notional * 0.0004)  # Binance taker fee ~0.04%
+            estimated_fee = abs(notional * settings.taker_fee_rate)  # Binance taker fee ~0.04%
             await risk.record_fee(estimated_fee)
 
             await close_position(
@@ -281,8 +297,10 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 await telegram.notify_daily_target(daily_pnl)
                 await ev.publish_daily_target(redis, daily_pnl)
 
-            triggered = await risk.on_trade_closed(effective_pnl_pct, params["daily_loss_limit_percent"], pnl_usdt=pnl_usdt)
-            await ev.publish_trade_closed(redis, symbol, mode, pnl_usdt, effective_pnl_pct, close_reason, paper)
+            triggered = await risk.on_trade_closed(
+                effective_pnl_pct, params["daily_loss_limit_percent"],
+                pnl_usdt=pnl_usdt, capital_usdt=capital,
+            )
 
             if triggered:
                 logger.critical("Kill switch activated — halting all trading")
@@ -324,8 +342,10 @@ async def _try_open_trade(
             )
             side = collecting_side
 
-    # Phase 3: Compute effective confidence with Binance funding rate boost/penalty
+    # Apply regime confidence multiplier
     effective_confidence = pair.confidence
+    if regime_result is not None:
+        effective_confidence *= regime_result.confidence_multiplier
     fr_rate = pair.funding_rate if pair.funding_rate else 0.0
     fr_side = pair.funding_side_to_collect if pair.funding_side_to_collect else "NONE"
     if fr_side != "NONE":
@@ -407,6 +427,19 @@ async def _try_open_trade(
     if not can_open:
         logger.debug(f"Skip {symbol}: {reason}")
         return False
+
+    # Check correlation against already-open positions
+    try:
+        corr_raw = await redis.get(_CORR_CACHE_KEY)
+        if corr_raw:
+            corr_matrix = json.loads(corr_raw)
+            for open_sym in open_symbols:
+                r = abs(corr_matrix.get(symbol, {}).get(open_sym, 0.0))
+                if r >= 0.75:
+                    logger.debug(f"Skip {symbol}: correlated with open {open_sym} (r={r:.2f})")
+                    return False
+    except Exception:
+        pass
 
     current_price = await _get_live_price(symbol, redis)
     if not current_price or current_price <= 0:
@@ -588,14 +621,17 @@ async def _maybe_switch_trade(
     effective_pnl_pct = raw_pnl_pct * leverage
     notional = quantity * entry_price
     pnl_usdt = notional * effective_pnl_pct / 100
-    estimated_fee = abs(notional * 0.0004)
+    estimated_fee = abs(notional * settings.taker_fee_rate)
     await risk.record_fee(estimated_fee)
 
     await close_position(
         pos_id, symbol, current_price, pnl_usdt, effective_pnl_pct, "trade_switch",
         trade_id=trade_id, estimated_fee_usdt=estimated_fee, gross_pnl_usdt=pnl_usdt + estimated_fee,
     )
-    await risk.on_trade_closed(effective_pnl_pct, params["daily_loss_limit_percent"], pnl_usdt=pnl_usdt)
+    await risk.on_trade_closed(
+        effective_pnl_pct, params["daily_loss_limit_percent"],
+        pnl_usdt=pnl_usdt, capital_usdt=capital,
+    )
     await _try_open_trade(
         best_unopen, list(open_symbols - {symbol}), capital, redis, risk, params,
         funding_rates=funding_rates, regime_result=regime_result,
@@ -608,6 +644,26 @@ async def run_trading_engine(
     stop_event: asyncio.Event,
 ) -> None:
     risk = RiskManager(redis)
+    mode_flags = await _get_trading_mode_flags(redis)
+
+    await risk.set_status("awaiting_confirmation", {
+        "paper": mode_flags["paper"],
+        "testnet": mode_flags["use_testnet"],
+    })
+    logger.info("Trading engine ready — awaiting user confirmation to start trading")
+
+    while not stop_event.is_set():
+        cmd = await redis.get(COMMAND_KEY)
+        if cmd == "confirmed":
+            await redis.delete(COMMAND_KEY)
+            logger.info("User confirmed startup — beginning trading")
+            break
+        if cmd == "stop":
+            await risk.set_status("stopped")
+            logger.info("Stop command received during startup wait")
+            return
+        await asyncio.sleep(LOOP_INTERVAL)
+
     mode_flags = await _get_trading_mode_flags(redis)
     await risk.set_status("running", {
         "paper": mode_flags["paper"],
@@ -675,7 +731,14 @@ async def run_trading_engine(
                 await asyncio.sleep(LOOP_INTERVAL)
                 continue
 
-            await _check_and_close_positions(redis, risk, params, use_testnet=mode_flags["use_testnet"])
+            mode_flags = await _get_trading_mode_flags(redis)
+            if mode_flags["paper"]:
+                from bot.trading.paper import get_paper_capital
+                capital = await get_paper_capital(redis)
+            else:
+                capital = await get_account_balance(use_testnet=mode_flags["use_testnet"])
+
+            await _check_and_close_positions(redis, risk, params, use_testnet=mode_flags["use_testnet"], capital=capital)
 
             if kill_active and not defensive_active:
                 await asyncio.sleep(LOOP_INTERVAL)
@@ -683,14 +746,6 @@ async def run_trading_engine(
 
             positions = await get_open_positions()
             open_symbols = [p["symbol"] for p in positions]
-            await redis.set("bot:open_count", str(len(positions)))
-
-            mode_flags = await _get_trading_mode_flags(redis)
-            if mode_flags["paper"]:
-                from bot.trading.paper import get_paper_capital
-                capital = await get_paper_capital(redis)
-            else:
-                capital = await get_account_balance(use_testnet=mode_flags["use_testnet"])
 
             daily_pnl = await risk.get_daily_pnl()
             daily_trade_count = await risk.get_daily_trade_count()
@@ -759,8 +814,7 @@ async def run_trading_engine(
             if goal_enabled:
                 goal_data = await risk.get_goal()
                 if goal_data and goal_data.get("amount_usdt", 0) > 0:
-                    pnl_summary = await get_pnl_summary()
-                    goal_progress = pnl_summary["total_profit_usdt"] + pnl_summary["total_loss_usdt"]
+                    goal_progress = await risk.get_daily_pnl_usdt()
                     goal_target = float(goal_data["amount_usdt"])
                     if goal_progress < goal_target * 0.5:
                         adjusted_confidence = max(0.45, adjusted_confidence - 0.05)

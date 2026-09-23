@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     daily_loss_limit_percent: float = 10.0
     max_single_coin_exposure_percent: float = 30.0
     negative_trade_timeout_minutes: int = 0
+    taker_fee_rate: float = 0.0004
 
     paper_trading_mode: bool = True
     live_trading_enabled: bool = False

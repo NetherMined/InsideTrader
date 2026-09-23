@@ -5,13 +5,16 @@ An ML-powered Binance auto-trading bot with a Next.js management dashboard. Supp
 ## Features
 
 - **ML Predictions** — XGBoost model with 45 technical features (RSI, MACD, Bollinger Bands, Stochastic, OBV, regime detection, and more)
+- **Performance Tracker** — Per-symbol win-rate history adjusts confidence multipliers per asset (0.90–1.10x), requires minimum 10 trades
+- **Regime Filter** — ADX-based market regime detection; ranging markets (ADX<20) require RSI extremes, transitional markets raise threshold +0.05
 - **Dynamic Mode** — Automatically switches between SPOT and FUTURES per trade based on confidence
 - **Risk Management** — Per-trade stop-loss/take-profit, daily loss kill-switch, position sizing, negative trade timeout
 - **Trading Levels** — Conservative / Balanced / Aggressive presets, live-switchable from the dashboard
 - **Trading Goals** — Set a USDT target over a time period; bot adjusts confidence thresholds to pace toward the goal
+- **P&L Analytics** — Period-based P&L stats (1h / 24h / 7d / 30d / ALL) split by realized and unrealized
 - **Paper Trading** — Full paper simulation with realistic margin accounting for futures
 - **Live Trading** — Direct Binance order execution via ccxt (spot + futures with 5x leverage)
-- **Next.js Dashboard** — 8 pages with live WebSocket prices, bot controls, P&L charts, open positions, trade history, backtests, and settings
+- **Next.js Dashboard** — 9 pages with live WebSocket prices, bot controls, P&L charts, open positions, trade history, backtests, and settings
 - **Production Ready** — Docker Compose, Nginx reverse proxy, one-command VPS deploy script
 
 ## Tech Stack
@@ -97,6 +100,7 @@ This uses `docker-compose.prod.yml` with Nginx on port 80.
 | `/positions` | Open positions with manual close |
 | `/history` | Closed trade history and win rate stats |
 | `/backtests` | Backtest results and performance charts |
+| `/user-stats` | Profit on initial investment summary and user performance stats |
 | `/settings` | Bot configuration, trading mode, Binance account |
 
 ## Configuration

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     binance_api_secret: str = ""
     binance_testnet_api_key: str = ""
     binance_testnet_api_secret: str = ""
-    use_testnet: bool = True
+    use_testnet: bool = False
     binance_region: str = "binance.com"
 
     postgres_host: str = "localhost"
@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_password: str = ""
+
+    cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     dashboard_secret_key: str = "change_this_secret"
     dashboard_username: str = "admin"

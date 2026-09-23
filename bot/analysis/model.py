@@ -109,15 +109,25 @@ class PricePredictor:
             return 0.0, 0.0
 
         predicted_change = float(self._regressor.predict(row)[0])
+
+        if not (-100 < predicted_change < 500):
+            logger.warning(f"{self.symbol}: invalid prediction change={predicted_change:.2f}, returning 0")
+            return 0.0, 0.0
+
         proba = self._classifier.predict_proba(row)[0]
+        classes = list(self._classifier.classes_)
 
         if predicted_change >= 0:
-            confidence = float(proba[1])
+            idx = classes.index(1) if 1 in classes else -1
         else:
-            confidence = float(proba[0])
+            idx = classes.index(0) if 0 in classes else 0
 
-        # Cap at 0.92 — prevents 0.99 confidence on spurious signals
-        confidence = min(confidence, 0.92)
+        if 0 <= idx < len(proba):
+            confidence = float(proba[idx])
+        else:
+            confidence = float(max(proba))
+
+        confidence = max(0.0, min(confidence, 0.92))
 
         return predicted_change, confidence
 
@@ -147,8 +157,11 @@ class PricePredictor:
             return False
 
         loaded_cols = joblib.load(cols_path)
-        if loaded_cols != FEATURE_COLS:
+        if set(loaded_cols) != set(FEATURE_COLS):
             logger.info(f"{self.symbol}: feature set changed ({len(loaded_cols)} → {len(FEATURE_COLS)} cols), retraining")
+            return False
+        if loaded_cols != FEATURE_COLS:
+            logger.warning(f"{self.symbol}: feature column order differs from current code, retraining for consistency")
             return False
 
         self._regressor = joblib.load(reg_path)

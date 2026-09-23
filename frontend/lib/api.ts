@@ -2,10 +2,13 @@ import type {
   Health, Market, Prediction, Position, Trade,
   BotStatus, Backtest, LivePrice, Candle,
   TradeLimits, Goal, PnlPeriodStats,
-  AccountBalances, LiveMode, MarketSentiment,
+  AccountBalances, LiveMode, MarketSentiment, StartupStatus,
 } from './types';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY || '';
+const mutationHeaders = (): HeadersInit => ({ 'X-Api-Key': API_KEY });
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { cache: 'no-store' });
@@ -14,7 +17,7 @@ async function get<T>(path: string): Promise<T> {
 }
 
 async function post<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { method: 'POST', cache: 'no-store' });
+  const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: mutationHeaders(), cache: 'no-store' });
   if (!res.ok) throw new Error(`${res.status} ${path}`);
   return res.json();
 }
@@ -22,7 +25,7 @@ async function post<T>(path: string): Promise<T> {
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...mutationHeaders() },
     body: JSON.stringify(body),
     cache: 'no-store',
   });
@@ -31,7 +34,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { method: 'DELETE', cache: 'no-store' });
+  const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: mutationHeaders(), cache: 'no-store' });
   if (!res.ok) throw new Error(`${res.status} ${path}`);
   return res.json();
 }
@@ -82,6 +85,8 @@ export const api = {
   getLiveMode: () => get<LiveMode>('/api/v1/settings/live-mode'),
   setLiveMode: (mode: Partial<LiveMode>) => postJson<LiveMode>('/api/v1/settings/live-mode', mode),
   marketSentiment: () => get<MarketSentiment>('/api/v1/market/sentiment'),
+  startupStatus: () => get<StartupStatus>('/api/v1/bot/startup-status'),
+  confirmStartup: () => post<{ ok: boolean; message: string }>('/api/v1/bot/confirm-startup'),
 };
 
 export const WS_URL = BASE.replace(/^http/, 'ws') + '/ws/prices';

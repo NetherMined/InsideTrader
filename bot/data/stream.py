@@ -64,6 +64,7 @@ async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
                     pipe.set(key, payload, ex=PRICE_TTL)
 
                 await pipe.execute()
+                await redis.set("bot:price_stream_active", str(len(tickers)), ex=30)
 
                 # Compute and cache market sentiment from live ticker data
                 advancing = sum(1 for t in tickers.values() if (t.get("percentage") or 0.0) > 0)
@@ -97,10 +98,10 @@ async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
 
             except ccxt.NetworkError as e:
                 logger.warning(f"Network error during price poll: {e}")
+                await redis.set("bot:price_stream_active", str(len(active_pairs)), ex=30)
             except Exception as e:
                 msg = str(e)
                 if "does not have market symbol" in msg:
-                    # Drop the unknown symbol so one bad pair doesn't break every poll
                     bad = msg.split("does not have market symbol")[-1].strip().split()[0]
                     if bad in active_pairs:
                         active_pairs.remove(bad)
@@ -109,6 +110,7 @@ async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
                         logger.warning(f"Price poll skipped unknown market: {msg}")
                 else:
                     logger.warning(f"Price poll error: {e}")
+                await redis.set("bot:price_stream_active", str(len(active_pairs)), ex=30)
 
             await asyncio.sleep(POLL_INTERVAL)
 

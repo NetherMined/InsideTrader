@@ -124,16 +124,19 @@ async def _analyse_symbol(symbol: str) -> dict | None:
 
         predictor.save()
 
-        # Backtest skipped for speed — remove this block to enable backtesting
-        # if len(X_test) > 10 and len(df_test) > 10:
-        #     pred_reg_test = pd.Series(predictor._regressor.predict(X_test), index=range(len(X_test)))
-        #     pred_proba_test = pd.Series(
-        #         predictor._classifier.predict_proba(X_test)[:, 1], index=range(len(X_test))
-        #     )
-        #     await run_backtest(
-        #         symbol, df_test, pred_reg_test, pred_proba_test,
-        #         settings.stop_loss_percent, settings.take_profit_percent, settings.futures_leverage,
-        #     )
+        if len(X_test) > 10 and len(df_test) > 10:
+            try:
+                pred_reg_test = pd.Series(predictor._regressor.predict(X_test), index=range(len(X_test)))
+                cls_idx = list(predictor._classifier.classes_).index(1) if 1 in predictor._classifier.classes_ else 1
+                pred_proba_test = pd.Series(
+                    predictor._classifier.predict_proba(X_test)[:, cls_idx], index=range(len(X_test))
+                )
+                await run_backtest(
+                    symbol, df_test, pred_reg_test, pred_proba_test,
+                    settings.stop_loss_percent, settings.take_profit_percent, settings.futures_leverage,
+                )
+            except Exception as e:
+                logger.warning(f"{symbol}: backtest failed ({e}), continuing")
 
     X_latest = get_X(feat_df.dropna(subset=["rsi", "adx", "atr"])).tail(1)
     if X_latest.empty or X_latest.isnull().any().any():
