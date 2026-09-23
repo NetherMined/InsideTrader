@@ -199,8 +199,8 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         symbol = pos["symbol"]
         current_price = await _get_live_price(symbol, redis)
         if current_price is None:
-            logger.warning(f"{symbol}: price fetch failed, using entry price as fallback")
-            current_price = float(pos["entry_price"])
+            logger.warning(f"{symbol}: price fetch failed — skipping position check (SL/TP frozen until price returns)")
+            continue
 
         entry_price = float(pos["entry_price"])
         quantity = float(pos["quantity"])
@@ -216,7 +216,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         if side == "BUY":
             raw_pnl_pct = (current_price / entry_price - 1) * 100
         else:
-            raw_pnl_pct = (entry_price / current_price - 1) * 100
+            raw_pnl_pct = (entry_price - current_price) / entry_price * 100
         effective_pnl_pct = raw_pnl_pct * leverage
         notional = quantity * entry_price
         pnl_usdt = notional * effective_pnl_pct / 100
@@ -228,7 +228,8 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
 
         recovery_key = "bot:recovery_mode"
         in_recovery_raw = await redis.sismember(recovery_key, str(pos_id))
-        if not in_recovery_raw and effective_pnl_pct <= -2.0 and take_profit > entry_price:
+        be_eligible = (side == "BUY" and take_profit > entry_price) or (side == "SELL" and take_profit < entry_price)
+        if not in_recovery_raw and effective_pnl_pct <= -2.0 and be_eligible:
             new_tp = entry_price
             await update_position_tp(pos_id, new_tp)
             await redis.sadd(recovery_key, str(pos_id))
@@ -267,19 +268,30 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                     logger.info(f"{symbol}: closing stagnant profit after {minutes_open:.0f}min (${pnl_usdt:.4f})")
 
         if close_reason:
+            close_ok = True
             if paper:
                 if side == "BUY":
                     await simulate_sell(redis, symbol, quantity, entry_price, current_price, mode, leverage)
                 else:
                     await simulate_buy_back(redis, symbol, quantity, entry_price, current_price, mode, leverage)
             else:
+                close_result = None
                 if mode == "FUTURES":
                     if side == "BUY":
-                        await place_futures_market_close(symbol, quantity, use_testnet=use_testnet)
+                        close_result = await place_futures_market_close(symbol, quantity, use_testnet=use_testnet)
                     else:
-                        await place_futures_market_buy(symbol, quantity, leverage, use_testnet=use_testnet)
+                        close_result = await place_futures_market_buy(symbol, quantity, leverage, use_testnet=use_testnet)
                 else:
-                    await place_spot_market_sell(symbol, quantity, use_testnet=use_testnet)
+                    close_result = await place_spot_market_sell(symbol, quantity, use_testnet=use_testnet)
+                if close_result and not close_result.get("ok"):
+                    logger.critical(
+                        f"CLOSE ORDER FAILED for {symbol} (reason={close_reason}): "
+                        f"{close_result.get('error')} — position remains open on exchange, skipping DB close"
+                    )
+                    close_ok = False
+
+            if not close_ok:
+                continue
 
             await redis.srem(recovery_key, str(pos_id))
 
@@ -323,6 +335,15 @@ async def _try_open_trade(
     symbol = pair.symbol
     side = _determine_side(pair.predicted_change_pct)
 
+    # Per-symbol regime detection using pair's own indicators
+    if regime_result is None:
+        try:
+            regime_result = await _detect_regime_cached(
+                redis, symbol, pair.adx, pair.atr_pct, bb_width_pct=pair.bb_width_pct
+            )
+        except Exception as e:
+            logger.debug(f"{symbol}: regime detection failed ({e})")
+
     # Phase 2: Mean-reversion signal override when in RANGING regime
     if regime_result is not None and regime_result.strategy == "mean_reversion":
         from bot.analysis.regime_detector import generate_mean_reversion_signal
@@ -357,9 +378,10 @@ async def _try_open_trade(
         elif abs(fr_rate) > 0.001:
             effective_confidence = max(0.0, effective_confidence - 0.10)
 
-    # Require higher confidence for SELL (SHORT) — model has lower precision on downside predictions
-    if side == "SELL":
-        sell_floor = max(params["confidence_threshold"], 0.85)
+    # Require higher confidence for SELL (SHORT) — except for mean-reversion signals
+    is_mr_signal = regime_result is not None and regime_result.strategy == "mean_reversion"
+    if side == "SELL" and not is_mr_signal:
+        sell_floor = max(params["confidence_threshold"], 0.75)
         if effective_confidence < sell_floor:
             logger.debug(
                 f"{symbol}: skip SELL — confidence {effective_confidence:.2f} < {sell_floor:.2f}"
@@ -385,7 +407,7 @@ async def _try_open_trade(
     if params["mode"] != "SPOT":
         funding_rate = funding_rates.get(symbol, {}).get("funding_rate", 0.0) if funding_rates else 0.0
         from bot.analysis.funding_rate import should_avoid_futures
-        if should_avoid_futures(funding_rate, effective_confidence):
+        if should_avoid_futures(funding_rate, effective_confidence, side=side):
             logger.info(f"{symbol}: avoiding FUTURES due to unfavorable funding ({funding_rate:.6f})")
             mode = "SPOT"
         else:
@@ -505,6 +527,15 @@ async def _try_open_trade(
                 mode = "SPOT"
                 leverage = 1
                 quantity = quantity / lev  # margin-equivalent qty: don't spend full leveraged notional
+                # Recalculate SL/TP for SPOT (no leverage division)
+                stop_loss, take_profit = calculate_sl_tp_prices(
+                    current_price, "SPOT",
+                    side=side,
+                    sl_pct=params["stop_loss_percent"],
+                    tp_pct=params["take_profit_percent"],
+                    leverage=1,
+                    atr_pct=atr_for_tp,
+                )
                 result = await place_spot_market_buy(symbol, quantity, use_testnet=mode_flags["use_testnet"])
         else:
             if side == "BUY":
@@ -513,8 +544,12 @@ async def _try_open_trade(
                 result = await place_spot_market_sell(symbol, quantity, use_testnet=mode_flags["use_testnet"])
 
     if not result.get("ok"):
-        logger.error(f"Order failed for {symbol}: {result.get('error')}")
-        return False
+        error_msg = result.get("error", "")
+        if "fill price unavailable" in error_msg.lower():
+            logger.warning(f"Order placed but fill price unavailable for {symbol} — recording with current price")
+        else:
+            logger.error(f"Order failed for {symbol}: {error_msg}")
+            return False
 
     fill_price = result.get("fill_price") or current_price
     order_id = result.get("order_id")
@@ -600,7 +635,7 @@ async def _maybe_switch_trade(
     if side == "BUY":
         raw_pnl_pct = (current_price / entry_price - 1) * 100
     else:
-        raw_pnl_pct = (entry_price / current_price - 1) * 100
+        raw_pnl_pct = (entry_price - current_price) / entry_price * 100
     effective_pnl_pct = raw_pnl_pct * leverage
     notional = quantity * entry_price
     pnl_usdt = notional * effective_pnl_pct / 100
@@ -611,10 +646,13 @@ async def _maybe_switch_trade(
         pos_id, symbol, current_price, pnl_usdt, effective_pnl_pct, "trade_switch",
         trade_id=trade_id, estimated_fee_usdt=estimated_fee, gross_pnl_usdt=pnl_usdt + estimated_fee,
     )
-    await risk.on_trade_closed(
+    kill_triggered = await risk.on_trade_closed(
         effective_pnl_pct, params["daily_loss_limit_percent"],
         pnl_usdt=pnl_usdt, capital_usdt=capital,
     )
+    if kill_triggered:
+        logger.warning("Kill switch triggered during trade switch — skipping replacement trade")
+        return
     await _try_open_trade(
         best_unopen, list(open_symbols - {symbol}), capital, redis, risk, params,
         funding_rates=funding_rates, regime_result=regime_result,
@@ -726,10 +764,16 @@ async def run_trading_engine(
                 from bot.trading.paper import get_paper_capital
                 capital = await get_paper_capital(redis)
             else:
-                capital = await get_account_balance(use_testnet=mode_flags["use_testnet"])
+                live_bal = await get_account_balance(use_testnet=mode_flags["use_testnet"])
+                if live_bal is not None:
+                    capital = live_bal
+                else:
+                    logger.warning(f"Balance fetch failed — using last known capital ${capital:.2f}")
 
             await _check_and_close_positions(redis, risk, params, use_testnet=mode_flags["use_testnet"], capital=capital)
 
+            kill_active = await risk.is_kill_switch_active()
+            defensive_active = await risk.is_defensive_mode()
             if kill_active and not defensive_active:
                 await asyncio.sleep(LOOP_INTERVAL)
                 continue
@@ -743,28 +787,14 @@ async def run_trading_engine(
 
             confidence_threshold = params["confidence_threshold"]
 
-            # Fetch funding rates periodically (every 60s = 12 loops)
+            # Fetch funding rates periodically (every 60s = ~12 loops)
             funding_rates = {}
-            daily_trade_count = await risk.get_daily_trade_count()
-            if daily_trade_count % 20 == 0:
+            if _loop_count % 12 == 0:
                 all_symbols = [p.symbol for p in ranked_store.get("pairs", [])]
                 if all_symbols:
                     funding_rates = await _fetch_funding_rates_cached(redis, all_symbols)
 
-            # Detect regime for top symbols (use pair indicators; bb width not ranked so use default)
-            regime_result = None
-            ranked_for_regime = ranked_store.get("pairs", [])[:5]
-            for pair_obj in ranked_for_regime:
-                try:
-                    cached_regime = await _detect_regime_cached(
-                        redis, pair_obj.symbol, pair_obj.adx, pair_obj.atr_pct
-                    )
-                except Exception as e:
-                    logger.warning(f"{pair_obj.symbol}: regime check failed ({e})")
-                    continue
-                if cached_regime:
-                    regime_result = cached_regime
-                    break
+            # Regime is now detected per-symbol inside _try_open_trade (not once for all)
 
             await risk.set_status("running", {
                 "daily_pnl_pct": round(daily_pnl, 4),
@@ -784,7 +814,7 @@ async def run_trading_engine(
                         f"Fees: ${fee_check['fees_usdt']:.2f}, Net: ${fee_check['net_pnl_usdt']:.2f}"
                     )
 
-            await _maybe_switch_trade(ranked_store, positions, capital, redis, risk, params, funding_rates=funding_rates)
+            await _maybe_switch_trade(ranked_store, positions, capital, redis, risk, params, funding_rates=funding_rates, regime_result=None)
 
             positions = await get_open_positions()
             open_symbols = [p["symbol"] for p in positions]
@@ -835,7 +865,6 @@ async def run_trading_engine(
                     opened = await _try_open_trade(
                         pair, open_symbols, capital, redis, risk, params,
                         funding_rates=funding_rates,
-                        regime_result=regime_result,
                     )
                     if opened:
                         open_symbols.append(pair.symbol)

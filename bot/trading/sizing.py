@@ -87,6 +87,7 @@ def calculate_sl_tp_prices(
 
     if mode == "FUTURES":
         _sl_pct = _sl_pct / _leverage
+        _tp_pct = _tp_pct / _leverage
 
     if side == "BUY":
         stop_loss = entry_price * (1 - _sl_pct / 100)

@@ -33,6 +33,7 @@ class RankedPair:
     mode: str
     rsi: float = 50.0
     bb_pct: float = 0.5
+    bb_width_pct: float = 0.05
     funding_rate: float = 0.0
     funding_side_to_collect: str = "NONE"
 
@@ -118,7 +119,7 @@ def filter_correlated_pairs(
                 continue
             if correlation_matrix:
                 r = correlation_matrix.get(pair.symbol, {}).get(other.symbol, 0.0)
-                correlated = abs(r) >= correlation_threshold
+                correlated = r >= correlation_threshold  # Only filter positive correlation; negative = diversification
             else:
                 correlated = pair.symbol.split("/")[0] == other.symbol.split("/")[0]
             if correlated:
@@ -178,6 +179,7 @@ def rank_pairs(
                 mode=p.get("mode", "SPOT"),
                 rsi=p.get("rsi", 50.0),
                 bb_pct=p.get("bb_pct", 0.5),
+                bb_width_pct=p.get("bb_width_pct", 0.05),
                 funding_rate=funding_rates.get(symbol, {}).get("funding_rate", 0.0) if funding_rates else 0.0,
                 funding_side_to_collect=funding_rates.get(symbol, {}).get("side_to_collect", "NONE") if funding_rates else "NONE",
             )

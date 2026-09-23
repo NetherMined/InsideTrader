@@ -105,14 +105,18 @@ def is_extreme_funding(funding_rate: float) -> bool:
     return abs(funding_rate) >= FUNDING_EXTREME_THRESHOLD
 
 
-def should_avoid_futures(funding_rate: float, confidence: float, threshold: float = 0.0005) -> bool:
+def should_avoid_futures(funding_rate: float, confidence: float, side: str = "BUY", threshold: float = 0.0005) -> bool:
     """Return True if FUTURES mode should be avoided due to unfavorable funding.
 
-    Avoids paying significant funding on a low-confidence trade.
+    Only avoids when the bot's side is the PAYING side:
+    - Positive funding: longs pay shorts → avoid LONG (BUY)
+    - Negative funding: shorts pay longs → avoid SHORT (SELL)
     """
-    if funding_rate > threshold and confidence < 0.80:
+    if confidence >= 0.80:
+        return False
+    if funding_rate > threshold and side == "BUY":
         return True
-    if funding_rate < -threshold and confidence < 0.80:
+    if funding_rate < -threshold and side == "SELL":
         return True
     return False
 

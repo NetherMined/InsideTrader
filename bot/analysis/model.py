@@ -36,6 +36,7 @@ class PricePredictor:
             random_state=42,
             n_jobs=-1,
             verbosity=0,
+            early_stopping_rounds=30,
         )
         self._classifier = XGBClassifier(
             n_estimators=300,
@@ -48,6 +49,7 @@ class PricePredictor:
             random_state=42,
             n_jobs=-1,
             eval_metric="logloss",
+            early_stopping_rounds=30,
             verbosity=0,
         )
         self._trained = False
@@ -74,8 +76,16 @@ class PricePredictor:
             self._classifier.set_params(scale_pos_weight=scale_pos_weight)
             logger.debug(f"{self.symbol}: class balance UP={pos_count} DOWN={neg_count} scale_pos_weight={scale_pos_weight:.2f}")
 
-        self._regressor.fit(X_train, yr_train)
-        self._classifier.fit(X_train, yc_train)
+        self._regressor.fit(
+            X_train, yr_train,
+            eval_set=[(X_test, yr_test)],
+            verbose=False,
+        )
+        self._classifier.fit(
+            X_train, yc_train,
+            eval_set=[(X_test, yc_test)],
+            verbose=False,
+        )
         self._trained = True
 
         reg_pred = self._regressor.predict(X_test)
@@ -110,7 +120,7 @@ class PricePredictor:
 
         predicted_change = float(self._regressor.predict(row)[0])
 
-        if not (-100 < predicted_change < 500):
+        if not (-50 < predicted_change < 50):
             logger.warning(f"{self.symbol}: invalid prediction change={predicted_change:.2f}, returning 0")
             return 0.0, 0.0
 

@@ -127,7 +127,11 @@ class RiskManager:
         return val == "1"
 
     async def activate_defensive_mode(self) -> None:
+        already_defensive = (await self._redis.get(DEFENSIVE_KEY)) == "1"
         await self._redis.set(DEFENSIVE_KEY, "1")
+        if already_defensive:
+            logger.debug("Defensive mode already active — skipping param backup to avoid overwriting originals")
+            return
         for key, redis_key in [
             ("mode", MODE_KEY),
             ("confidence_threshold", CONFIDENCE_KEY),
