@@ -5,7 +5,7 @@ import { api, WS_URL } from '@/lib/api';
 import { BotControls } from '@/components/BotControls';
 import { PositionChart } from '@/components/PositionCharts';
 import { fmt, fmtPct, fmtPrice } from '@/lib/utils';
-import type { BotStatus, Position, LivePrice, Candle, PnlPeriodStats } from '@/lib/types';
+import type { BotStatus, Position, LivePrice, Candle, PnlPeriodStats, MarketSentiment } from '@/lib/types';
 import { useCurrency } from '@/lib/currency';
 import { ExternalLink } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
@@ -180,6 +180,105 @@ function GoalCard({
   );
 }
 
+function MarketBanner() {
+  const { display } = useCurrency();
+  const [data, setData] = useState<MarketSentiment | null>(null);
+
+  useEffect(() => {
+    api.marketSentiment().then(setData).catch(() => null);
+    const id = setInterval(() => {
+      api.marketSentiment().then(setData).catch(() => null);
+    }, 60000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!data) return null;
+
+  const sentimentColor =
+    data.sentiment === 'BULLISH' ? '#0ecb81' :
+    data.sentiment === 'BEARISH' ? '#f6465d' : '#f0b90b';
+
+  const sentimentBg =
+    data.sentiment === 'BULLISH' ? 'rgba(14,203,129,0.08)' :
+    data.sentiment === 'BEARISH' ? 'rgba(246,70,93,0.08)' : 'rgba(240,185,11,0.08)';
+
+  const advancePct = Math.round(data.advance_ratio * 100);
+
+  return (
+    <div
+      className="rounded-xl px-5 py-4"
+      style={{ background: sentimentBg, border: `1px solid ${sentimentColor}22` }}
+    >
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:gap-6">
+        <div className="flex items-center gap-3 shrink-0">
+          <div
+            className="px-3 py-1.5 rounded-lg font-bold text-sm tracking-wide"
+            style={{ background: `${sentimentColor}20`, color: sentimentColor, border: `1px solid ${sentimentColor}40` }}
+          >
+            {data.strength.toUpperCase()}
+          </div>
+          <div className="text-xs" style={{ color: '#848e9c' }}>
+            <span style={{ color: '#0ecb81' }}>{data.advancing} up</span>
+            {' / '}
+            <span style={{ color: '#f6465d' }}>{data.declining} down</span>
+            {' / '}
+            <span style={{ color: '#555' }}>{data.neutral_count} flat</span>
+            <span style={{ color: '#444' }}> &middot; {data.total_symbols} pairs</span>
+          </div>
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1.5">
+            <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: '#1f1f1f' }}>
+              <div
+                className="h-full rounded-full transition-all duration-700"
+                style={{ width: `${advancePct}%`, background: sentimentColor }}
+              />
+            </div>
+            <span className="text-xs font-semibold shrink-0" style={{ color: sentimentColor }}>
+              {advancePct}% advancing
+            </span>
+          </div>
+          <div className="text-xs" style={{ color: '#848e9c', lineHeight: 1.5 }}>
+            {data.strategy}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 shrink-0">
+          {data.top_gainers.length > 0 && (
+            <div className="text-xs">
+              <div className="mb-1" style={{ color: '#555' }}>Top Gainers</div>
+              {data.top_gainers.map((s) => (
+                <div key={s} style={{ color: '#0ecb81' }}>{s.replace('/USDT', '')}</div>
+              ))}
+            </div>
+          )}
+          {data.top_losers.length > 0 && (
+            <div className="text-xs">
+              <div className="mb-1" style={{ color: '#555' }}>Top Losers</div>
+              {data.top_losers.map((s) => (
+                <div key={s} style={{ color: '#f6465d' }}>{s.replace('/USDT', '')}</div>
+              ))}
+            </div>
+          )}
+          <div
+            className="rounded-lg px-3 py-2 text-right"
+            style={{ background: '#111111', border: '1px solid #1f1f1f', minWidth: 100 }}
+          >
+            <div className="text-xs mb-0.5" style={{ color: '#848e9c' }}>Est. Daily Profit</div>
+            <div className="text-base font-bold" style={{ color: sentimentColor }}>
+              {display(data.estimated_daily_profit_usdt)}
+            </div>
+            <div className="text-xs" style={{ color: '#555' }}>
+              ~{data.estimated_daily_profit_pct.toFixed(2)}%
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const { display, tooltip } = useCurrency();
   const [status, setStatus] = useState<BotStatus | null>(null);
@@ -300,6 +399,8 @@ export default function DashboardPage() {
         </div>
         <BotControls status={status} onUpdate={loadStatus} />
       </div>
+
+      <MarketBanner />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         <PnlSplitCard />

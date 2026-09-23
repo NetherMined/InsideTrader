@@ -100,12 +100,17 @@ async def _analyse_symbol(symbol: str) -> dict | None:
     df, feat_df, X, y_reg, y_cls = await asyncio.to_thread(
         _prepare_features, df_raw, settings.daily_target_percent / 2
     )
-    if len(X) < 50:
+    if len(X) < 100:
         logger.debug(f"{symbol}: not enough clean rows ({len(X)}), skipping")
         return None
 
     predictor = PricePredictor(symbol)
     loaded = predictor.load()
+
+    # Force retrain if model is stale (>24h old) — prevents regime-bias from persisting
+    if loaded and predictor.is_stale():
+        logger.info(f"{symbol}: model is stale (>24h), retraining with latest data")
+        loaded = False
 
     if not loaded:
         split = int(len(X) * 0.8)

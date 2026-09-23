@@ -168,6 +168,18 @@ def _determine_side(predicted_change_pct: float) -> str:
     return "SELL"
 
 
+async def _get_market_sentiment(redis: aioredis.Redis) -> tuple[str, float]:
+    """Return (sentiment, advance_ratio) from Redis. Defaults to NEUTRAL/0.5 if unavailable."""
+    raw = await redis.get("market:sentiment")
+    if raw:
+        try:
+            data = json.loads(raw)
+            return data.get("sentiment", "NEUTRAL"), float(data.get("advance_ratio", 0.5))
+        except Exception:
+            pass
+    return "NEUTRAL", 0.5
+
+
 async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, params: dict, use_testnet: bool | None = None) -> None:
     positions = await get_open_positions()
 
@@ -301,6 +313,17 @@ async def _try_open_trade(
             logger.debug(f"{symbol}: RANGING regime but no MR signal (rsi={pair.rsi:.1f} bb_pct={pair.bb_pct:.2f}), skipping")
             return False
 
+    # Extreme funding arb: override ML direction to collect funding when rate >= 0.05%/8h
+    from bot.analysis.funding_rate import is_extreme_funding
+    if pair.funding_rate and is_extreme_funding(pair.funding_rate):
+        collecting_side = pair.funding_side_to_collect
+        if collecting_side and collecting_side != "NONE" and collecting_side != side:
+            logger.info(
+                f"{symbol}: extreme funding ({pair.funding_rate:.4%}/8h) "
+                f"→ overriding {side} to {collecting_side} for arb"
+            )
+            side = collecting_side
+
     # Phase 3: Compute effective confidence with Binance funding rate boost/penalty
     effective_confidence = pair.confidence
     fr_rate = pair.funding_rate if pair.funding_rate else 0.0
@@ -310,6 +333,15 @@ async def _try_open_trade(
             effective_confidence = min(1.0, effective_confidence + 0.05)
         elif abs(fr_rate) > 0.001:
             effective_confidence = max(0.0, effective_confidence - 0.10)
+
+    # Require higher confidence for SELL (SHORT) — model has lower precision on downside predictions
+    if side == "SELL":
+        sell_floor = max(params["confidence_threshold"], 0.85)
+        if effective_confidence < sell_floor:
+            logger.debug(
+                f"{symbol}: skip SELL — confidence {effective_confidence:.2f} < {sell_floor:.2f}"
+            )
+            return False
 
     # Funding rate awareness: prefer the side that collects funding
     funding_signal = None
@@ -323,6 +355,9 @@ async def _try_open_trade(
             else:
                 logger.debug(f"{symbol}: funding signal {funding_signal} opposes predicted {side}")
 
+    # Read market sentiment once — used for both mode selection and direction filter
+    market_sentiment, advance_ratio = await _get_market_sentiment(redis)
+
     # Gate FUTURES mode if funding is unfavorable and confidence is low
     if params["mode"] != "SPOT":
         funding_rate = funding_rates.get(symbol, {}).get("funding_rate", 0.0) if funding_rates else 0.0
@@ -331,13 +366,35 @@ async def _try_open_trade(
             logger.info(f"{symbol}: avoiding FUTURES due to unfavorable funding ({funding_rate:.6f})")
             mode = "SPOT"
         else:
+            # Lower the futures confidence threshold slightly when sentiment strongly agrees with the trade side
+            futures_threshold = params["confidence_threshold"]
+            if market_sentiment == "BULLISH" and side == "BUY" and advance_ratio > 0.65:
+                futures_threshold = max(0.65, futures_threshold - 0.05)
+            elif market_sentiment == "BEARISH" and side == "SELL" and advance_ratio < 0.35:
+                futures_threshold = max(0.65, futures_threshold - 0.05)
             mode = classify_mode(
                 effective_confidence, pair.atr_pct, pair.adx,
                 trading_mode=params["mode"],
-                confidence_threshold=params["confidence_threshold"],
+                confidence_threshold=futures_threshold,
             )
     else:
         mode = "SPOT"
+
+    # Sentiment-based direction filter — don't fight the macro trend
+    if market_sentiment == "BULLISH" and side == "SELL":
+        logger.debug(
+            f"{symbol}: skip SELL — market is BULLISH ({advance_ratio:.0%} advancing)"
+        )
+        return False
+
+    if market_sentiment == "BEARISH" and side == "BUY":
+        bearish_buy_min_conf = 0.85
+        if effective_confidence < bearish_buy_min_conf:
+            logger.debug(
+                f"{symbol}: skip BUY in BEARISH market "
+                f"(conf={effective_confidence:.2f} < {bearish_buy_min_conf})"
+            )
+            return False
 
     mode_flags = await _get_trading_mode_flags(redis)
     paper = mode_flags["paper"]
@@ -387,12 +444,18 @@ async def _try_open_trade(
         logger.debug(f"Skip {symbol}: position size too small")
         return False
 
+    # In ranging markets use a tighter TP (0.6× ATR) for faster grid-style cycling
+    atr_for_tp = pair.atr_pct
+    if regime_result is not None and regime_result.regime == "RANGING":
+        atr_for_tp = pair.atr_pct * 0.6
+
     stop_loss, take_profit = calculate_sl_tp_prices(
         current_price, mode,
         side=side,
         sl_pct=params["stop_loss_percent"],
         tp_pct=params["take_profit_percent"],
         leverage=lev,
+        atr_pct=atr_for_tp,
     )
     leverage = lev if mode == "FUTURES" else 1
 
@@ -478,8 +541,18 @@ async def _maybe_switch_trade(
     if best_unopen is None:
         return
 
+    # Require very high confidence on the new pair to justify disrupting an existing position
+    if best_unopen.confidence < 0.92:
+        return
+
     worst_pos = min(positions, key=lambda p: float(p["unrealized_pnl"]))
     if float(worst_pos["unrealized_pnl"]) >= 0:
+        return
+
+    # Only switch if the loss is substantial (>= 1.5% of notional) — avoids churning on small fluctuations
+    worst_notional = float(worst_pos["entry_price"]) * float(worst_pos["quantity"])
+    worst_loss_pct = abs(float(worst_pos["unrealized_pnl"])) / max(worst_notional, 1.0) * 100
+    if worst_loss_pct < 1.5:
         return
 
     symbol = worst_pos["symbol"]

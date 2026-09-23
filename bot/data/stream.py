@@ -65,6 +65,30 @@ async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
 
                 await pipe.execute()
 
+                # Compute and cache market sentiment from live ticker data
+                advancing = sum(1 for t in tickers.values() if (t.get("percentage") or 0.0) > 0)
+                declining = sum(1 for t in tickers.values() if (t.get("percentage") or 0.0) < 0)
+                _total = max(len(tickers), 1)
+                _advance_ratio = advancing / _total
+                if _advance_ratio > 0.55:
+                    _sentiment = "BULLISH"
+                elif _advance_ratio < 0.45:
+                    _sentiment = "BEARISH"
+                else:
+                    _sentiment = "NEUTRAL"
+                await redis.set(
+                    "market:sentiment",
+                    json.dumps({
+                        "sentiment": _sentiment,
+                        "advance_ratio": round(_advance_ratio, 4),
+                        "advancing": advancing,
+                        "declining": declining,
+                        "total": _total,
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }),
+                    ex=120,
+                )
+
                 await redis.set(
                     "prices:last_update",
                     datetime.now(timezone.utc).isoformat(),

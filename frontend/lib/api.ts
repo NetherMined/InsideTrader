@@ -2,7 +2,7 @@ import type {
   Health, Market, Prediction, Position, Trade,
   BotStatus, Backtest, LivePrice, Candle,
   TradeLimits, Goal, PnlPeriodStats,
-  AccountBalances, LiveMode,
+  AccountBalances, LiveMode, MarketSentiment,
 } from './types';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -81,6 +81,7 @@ export const api = {
   convertAllToUsdt: () => post<{ ok: boolean; conversions: Array<{ asset: string; ok: boolean; usdt_received?: number; error?: string }> }>('/api/v1/account/convert-all'),
   getLiveMode: () => get<LiveMode>('/api/v1/settings/live-mode'),
   setLiveMode: (mode: Partial<LiveMode>) => postJson<LiveMode>('/api/v1/settings/live-mode', mode),
+  marketSentiment: () => get<MarketSentiment>('/api/v1/market/sentiment'),
 };
 
 export const WS_URL = BASE.replace(/^http/, 'ws') + '/ws/prices';

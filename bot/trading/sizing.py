@@ -63,15 +63,21 @@ def calculate_sl_tp_prices(
     sl_pct: float | None = None,
     tp_pct: float | None = None,
     leverage: int | None = None,
+    atr_pct: float | None = None,
 ) -> tuple[float, float]:
     """Return (stop_loss_price, take_profit_price).
 
+    When atr_pct is provided, take-profit is set dynamically to 1.5× ATR,
+    floored at 2.5% and capped at 6.0%, giving larger targets on volatile moves.
     For futures, stop-loss is tighter due to leverage magnifying losses.
-    Optional sl_pct, tp_pct, leverage override settings defaults.
     """
     _sl_pct = sl_pct if sl_pct is not None else settings.stop_loss_percent
-    _tp_pct = tp_pct if tp_pct is not None else settings.take_profit_percent
     _leverage = leverage if leverage is not None else settings.futures_leverage
+
+    if atr_pct is not None and atr_pct > 0:
+        _tp_pct = max(2.5, min(6.0, atr_pct * 1.5))
+    else:
+        _tp_pct = tp_pct if tp_pct is not None else settings.take_profit_percent
 
     if mode == "FUTURES":
         _sl_pct = _sl_pct / _leverage

@@ -1245,6 +1245,129 @@ async def get_pnl_stats(period: str = Query("all", description="1h | 24h | 7d | 
     )
 
 
+class MarketSentimentResponse(BaseModel):
+    sentiment: str
+    strength: str
+    advance_ratio: float
+    advancing: int
+    declining: int
+    neutral_count: int
+    total_symbols: int
+    avg_change_pct: float
+    top_gainers: list[str]
+    top_losers: list[str]
+    strategy: str
+    estimated_daily_profit_usdt: float
+    estimated_daily_profit_pct: float
+
+
+@app.get("/api/v1/market/sentiment", response_model=MarketSentimentResponse)
+async def get_market_sentiment():
+    redis = await get_redis()
+    try:
+        # Prefer the bot's pre-computed sentiment (updated every 10s by price stream)
+        # Fall back to computing from individual price keys if bot hasn't populated it yet
+        cached = await redis.get("market:sentiment")
+        if cached:
+            try:
+                cached_data = json.loads(cached)
+                advance_ratio = float(cached_data.get("advance_ratio", 0.5))
+                advancing = int(cached_data.get("advancing", 0))
+                declining = int(cached_data.get("declining", 0))
+                total_symbols = int(cached_data.get("total", 0))
+                neutral_count = total_symbols - advancing - declining
+            except Exception:
+                cached = None
+
+        if not cached:
+            keys = await redis.keys("price:*")
+            prices_data = []
+            if keys:
+                values = await redis.mget(keys)
+                for raw in values:
+                    if raw:
+                        try:
+                            prices_data.append(json.loads(raw))
+                        except Exception:
+                            pass
+            advancing = sum(1 for p in prices_data if p.get("change_pct", 0) > 0)
+            declining = sum(1 for p in prices_data if p.get("change_pct", 0) < 0)
+            total_symbols = len(prices_data)
+            neutral_count = total_symbols - advancing - declining
+            advance_ratio = advancing / max(total_symbols, 1)
+
+        # Top gainers/losers from price keys
+        keys = await redis.keys("price:*")
+        prices_data = []
+        if keys:
+            values = await redis.mget(keys)
+            for raw in values:
+                if raw:
+                    try:
+                        prices_data.append(json.loads(raw))
+                    except Exception:
+                        pass
+
+        sorted_by_change = sorted(prices_data, key=lambda p: p.get("change_pct", 0), reverse=True)
+        top_gainers = [p["symbol"] for p in sorted_by_change[:3]]
+        top_losers = [p["symbol"] for p in sorted_by_change[-3:]][::-1]
+        avg_change = sum(p.get("change_pct", 0) for p in prices_data) / max(len(prices_data), 1)
+
+        if advance_ratio > 0.65:
+            sentiment, strength = "BULLISH", "Strong Bullish"
+            strategy = "Strong momentum — favor trend-following longs and breakouts. High-confidence futures signals are well-suited to current conditions."
+        elif advance_ratio > 0.55:
+            sentiment, strength = "BULLISH", "Mild Bullish"
+            strategy = "Mild upside bias — lean toward long setups on pullbacks. Keep position sizes moderate and confirm signals before entry."
+        elif advance_ratio < 0.35:
+            sentiment, strength = "BEARISH", "Strong Bearish"
+            strategy = "Risk-off environment — reduce exposure significantly. Focus on defensive shorts on overextended pairs and tighten stop-losses."
+        elif advance_ratio < 0.45:
+            sentiment, strength = "BEARISH", "Mild Bearish"
+            strategy = "Mild downside pressure — avoid aggressive longs. Consider selective shorts on high-volume pairs with clear breakdown signals."
+        else:
+            sentiment, strength = "NEUTRAL", "Neutral"
+            strategy = "Range-bound market — target mean-reversion setups at extremes. Prioritize high-confidence signals and keep position sizes conservative."
+
+        capital_raw = await redis.get("paper:capital_usdt")
+        capital = float(capital_raw) if capital_raw else 694.0
+        max_concurrent_raw = await redis.get("bot:max_concurrent_trades")
+        max_concurrent = int(max_concurrent_raw) if max_concurrent_raw else 20
+        min_daily_raw = await redis.get("bot:min_daily_trades")
+        min_daily = int(min_daily_raw) if min_daily_raw else 50
+        sl_raw = await redis.get("bot:stop_loss_percent")
+        sl_pct = float(sl_raw) / 100 if sl_raw else 0.02
+        tp_raw = await redis.get("bot:take_profit_percent")
+        tp_pct = float(tp_raw) / 100 if tp_raw else 0.03
+
+        win_rate = 0.55
+        notional_per_trade = capital / max(max_concurrent, 1)
+        expected_pnl_per_trade = notional_per_trade * (win_rate * tp_pct - (1 - win_rate) * sl_pct)
+        expected_trades = min_daily * 0.6
+        base_profit = expected_pnl_per_trade * expected_trades
+        multiplier = {"BULLISH": 1.25, "NEUTRAL": 1.0, "BEARISH": 0.65}[sentiment]
+        estimated_profit = round(base_profit * multiplier, 2)
+        estimated_profit_pct = round((estimated_profit / capital * 100) if capital > 0 else 0, 2)
+
+        return MarketSentimentResponse(
+            sentiment=sentiment,
+            strength=strength,
+            advance_ratio=round(advance_ratio, 4),
+            advancing=advancing,
+            declining=declining,
+            neutral_count=neutral_count,
+            total_symbols=total_symbols,
+            avg_change_pct=round(avg_change, 4),
+            top_gainers=top_gainers,
+            top_losers=top_losers,
+            strategy=strategy,
+            estimated_daily_profit_usdt=estimated_profit,
+            estimated_daily_profit_pct=estimated_profit_pct,
+        )
+    finally:
+        await redis.aclose()
+
+
 @app.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
     """Streams trading events (trade opened/closed, kill switch, daily target) in real-time."""

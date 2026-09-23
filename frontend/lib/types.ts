@@ -174,3 +174,19 @@ export interface LiveMode {
   live_trading_enabled: boolean;
   use_testnet: boolean;
 }
+
+export interface MarketSentiment {
+  sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  strength: string;
+  advance_ratio: number;
+  advancing: number;
+  declining: number;
+  neutral_count: number;
+  total_symbols: number;
+  avg_change_pct: number;
+  top_gainers: string[];
+  top_losers: string[];
+  strategy: string;
+  estimated_daily_profit_usdt: number;
+  estimated_daily_profit_pct: number;
+}
