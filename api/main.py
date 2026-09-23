@@ -487,6 +487,7 @@ class BotStatusResponse(BaseModel):
     win_count: int
     loss_count: int
     defensive_mode: bool = False
+    started_with_usdt: float = 0.0
 
 
 @app.get("/api/v1/positions", response_model=list[PositionResponse])
@@ -610,6 +611,12 @@ async def get_bot_status():
         except Exception:
             pass
 
+        if is_paper:
+            start_raw = await redis.get("paper:starting_capital_usdt")
+        else:
+            start_raw = await redis.get("bot:session_start_capital")
+        started_with_usdt = float(start_raw) if start_raw else capital
+
         return BotStatusResponse(
             state=state_data.get("state", "unknown"),
             daily_pnl_pct=daily_pnl,
@@ -627,6 +634,7 @@ async def get_bot_status():
             win_count=pnl_summary["win_count"],
             loss_count=pnl_summary["loss_count"],
             defensive_mode=defensive,
+            started_with_usdt=round(started_with_usdt, 2),
         )
     finally:
         await redis.aclose()

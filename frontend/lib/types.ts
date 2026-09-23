@@ -88,6 +88,7 @@ export interface BotStatus {
   win_count: number;
   loss_count: number;
   defensive_mode?: boolean;
+  started_with_usdt?: number;
 }
 
 export interface Goal {

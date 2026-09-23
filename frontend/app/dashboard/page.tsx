@@ -425,9 +425,9 @@ export default function DashboardPage() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         <PnlSplitCard />
         <StatCard
-          label="Portfolio Value"
+          label="Portfolio"
           value={display(totalPortfolio, 2)}
-          sub={`${display(freeCapital, 2)} free · ${clock}`}
+          sub={`Started: ${display(status?.started_with_usdt ?? 0, 2)} · ${display(freeCapital, 2)} free`}
         />
         <StatCard
           label="Open Trades"

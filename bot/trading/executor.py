@@ -262,6 +262,9 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 if minutes_open >= params["negative_trade_timeout_minutes"] and pnl_usdt < 0:
                     close_reason = "negative_timeout"
                     logger.info(f"{symbol}: closing after {minutes_open:.0f}min in loss (${pnl_usdt:.4f})")
+                elif minutes_open >= 15 and pnl_usdt > 0:
+                    close_reason = "profitable_timeout"
+                    logger.info(f"{symbol}: closing stagnant profit after {minutes_open:.0f}min (${pnl_usdt:.4f})")
 
         if close_reason:
             if paper:
@@ -386,35 +389,15 @@ async def _try_open_trade(
             logger.info(f"{symbol}: avoiding FUTURES due to unfavorable funding ({funding_rate:.6f})")
             mode = "SPOT"
         else:
-            # Lower the futures confidence threshold slightly when sentiment strongly agrees with the trade side
-            futures_threshold = params["confidence_threshold"]
-            if market_sentiment == "BULLISH" and side == "BUY" and advance_ratio > 0.65:
-                futures_threshold = max(0.65, futures_threshold - 0.05)
-            elif market_sentiment == "BEARISH" and side == "SELL" and advance_ratio < 0.35:
-                futures_threshold = max(0.65, futures_threshold - 0.05)
             mode = classify_mode(
                 effective_confidence, pair.atr_pct, pair.adx,
                 trading_mode=params["mode"],
-                confidence_threshold=futures_threshold,
+                confidence_threshold=params["confidence_threshold"],
             )
     else:
         mode = "SPOT"
 
-    # Sentiment-based direction filter — don't fight the macro trend
-    if market_sentiment == "BULLISH" and side == "SELL":
-        logger.debug(
-            f"{symbol}: skip SELL — market is BULLISH ({advance_ratio:.0%} advancing)"
-        )
-        return False
-
-    if market_sentiment == "BEARISH" and side == "BUY":
-        bearish_buy_min_conf = 0.85
-        if effective_confidence < bearish_buy_min_conf:
-            logger.debug(
-                f"{symbol}: skip BUY in BEARISH market "
-                f"(conf={effective_confidence:.2f} < {bearish_buy_min_conf})"
-            )
-            return False
+    logger.debug(f"{symbol}: market sentiment={market_sentiment} ({advance_ratio:.0%} advancing) side={side}")
 
     mode_flags = await _get_trading_mode_flags(redis)
     paper = mode_flags["paper"]
@@ -665,6 +648,13 @@ async def run_trading_engine(
         await asyncio.sleep(LOOP_INTERVAL)
 
     mode_flags = await _get_trading_mode_flags(redis)
+    if not mode_flags["paper"]:
+        try:
+            start_cap = await get_account_balance(use_testnet=mode_flags["use_testnet"])
+            await redis.set("bot:session_start_capital", str(start_cap))
+            logger.info(f"Session start capital recorded: ${start_cap:.2f} USDT")
+        except Exception as e:
+            logger.warning(f"Could not record session start capital: {e}")
     await risk.set_status("running", {
         "paper": mode_flags["paper"],
         "testnet": mode_flags["use_testnet"],
