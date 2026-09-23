@@ -32,18 +32,32 @@ async def scan_markets() -> list[dict]:
     """Fetch all active USDT pairs from Binance spot and futures markets."""
     results: list[dict] = []
 
-    for market_type in ["spot", "future"]:
+    for i, market_type in enumerate(["spot", "future"]):
+        if i > 0:
+            await asyncio.sleep(2)
         exchange = _make_public_exchange(market_type)
         try:
             await exchange.load_markets()
-            tickers = await exchange.fetch_tickers()
+
+            # Pre-filter to USDT symbols from loaded markets to reduce API weight
+            if market_type == "spot":
+                usdt_symbols = [
+                    s for s, m in exchange.markets.items()
+                    if s.endswith("/USDT") and m.get("active")
+                ]
+            else:
+                usdt_symbols = [
+                    s for s, m in exchange.markets.items()
+                    if ":USDT" in s and "/USDT" in s and m.get("active")
+                ]
+
+            tickers = await exchange.fetch_tickers(usdt_symbols) if usdt_symbols else {}
 
             for symbol, ticker in tickers.items():
                 if market_type == "spot":
                     if not symbol.endswith("/USDT"):
                         continue
                 else:
-                    # USDM futures symbols: BTC/USDT:USDT — must contain :USDT
                     if ":USDT" not in symbol or "/USDT" not in symbol:
                         continue
                 market = exchange.markets.get(symbol)

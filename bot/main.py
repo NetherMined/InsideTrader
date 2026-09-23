@@ -15,6 +15,7 @@ import asyncio
 import json
 import sys
 
+import ccxt.async_support as ccxt
 import redis.asyncio as aioredis
 from loguru import logger
 
@@ -44,6 +45,31 @@ def setup_logging() -> None:
         retention="30 days",
         compression="gz",
     )
+
+
+async def check_futures_position_mode() -> None:
+    """Warn and exit if Binance futures account is in Hedge Mode (One-Way required)."""
+    if settings.paper_trading_mode or settings.use_testnet:
+        return
+    exchange = ccxt.binance({
+        "apiKey": settings.binance_api_key,
+        "secret": settings.binance_api_secret,
+        "options": {"defaultType": "future"},
+    })
+    try:
+        result = await exchange.fapiPrivateGetPositionSideDual()
+        if result.get("dualSidePosition"):
+            logger.critical(
+                "Binance futures account is in Hedge Mode. "
+                "InsideTrader requires One-Way mode. "
+                "Disable Hedge Mode in Binance > Preferences > Position Mode, then restart."
+            )
+            sys.exit(1)
+        logger.info("Futures position mode: One-Way (OK)")
+    except Exception as e:
+        logger.warning(f"Could not verify futures position mode: {e}")
+    finally:
+        await exchange.close()
 
 
 async def startup_checks() -> None:
@@ -125,6 +151,7 @@ async def main() -> None:
     logger.info("=" * 60)
 
     await startup_checks()
+    await check_futures_position_mode()
     await init_db()
 
     logger.info("Scanning Binance markets...")
