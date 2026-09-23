@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { useCurrency } from '@/lib/currency';
-import type { BotStatus, PnlPeriodStats, Trade } from '@/lib/types';
+import type { BotStatus, PnlPeriodStats, Trade, Position } from '@/lib/types';
 
 function BigStat({
   label,
@@ -97,21 +97,24 @@ export default function UserStatsPage() {
   const [allTime, setAllTime] = useState<PnlPeriodStats | null>(null);
   const [today, setToday] = useState<PnlPeriodStats | null>(null);
   const [recentTrades, setRecentTrades] = useState<Trade[]>([]);
+  const [positions, setPositions] = useState<Position[]>([]);
   const [startingCapital, setStartingCapital] = useState<number>(0);
 
   const load = async () => {
-    const [s, a, t, trades, cap] = await Promise.allSettled([
+    const [s, a, t, trades, cap, pos] = await Promise.allSettled([
       api.botStatus(),
       api.pnlStats('all'),
       api.pnlStats('24h'),
       api.trades('CLOSED'),
       api.getCapital(),
+      api.positions(),
     ]);
     if (s.status === 'fulfilled') setStatus(s.value);
     if (a.status === 'fulfilled') setAllTime(a.value);
     if (t.status === 'fulfilled') setToday(t.value);
     if (trades.status === 'fulfilled') setRecentTrades(trades.value.slice(0, 8));
     if (cap.status === 'fulfilled') setStartingCapital(cap.value.starting_capital_usdt || cap.value.capital_usdt);
+    if (pos.status === 'fulfilled') setPositions(pos.value);
   };
 
   useEffect(() => {
@@ -120,12 +123,17 @@ export default function UserStatsPage() {
     return () => clearInterval(id);
   }, []);
 
-  const capital = status?.capital_usdt ?? 0;
+  const freeCapital = status?.capital_usdt ?? 0;
   const openPositions = status?.open_trades ?? 0;
 
+  const positionsValue = positions.reduce(
+    (sum, p) => sum + (p.entry_price * p.quantity) / p.leverage + (p.unrealized_pnl ?? 0),
+    0
+  );
+  const totalPortfolio = freeCapital + positionsValue;
+
   const netRealizedProfit = (allTime?.total_profit_usdt ?? 0) + (allTime?.total_loss_usdt ?? 0);
-  const totalPortfolioApprox = capital > 0 ? capital : netRealizedProfit + startingCapital;
-  const portfolioGainPct = startingCapital > 0 ? ((totalPortfolioApprox - startingCapital) / startingCapital) * 100 : 0;
+  const portfolioGainPct = startingCapital > 0 ? ((totalPortfolio - startingCapital) / startingCapital) * 100 : 0;
 
   const wins = allTime?.win_count ?? 0;
   const losses = allTime?.loss_count ?? 0;
@@ -172,7 +180,7 @@ export default function UserStatsPage() {
         </div>
         <div className="text-right text-xs" style={{ color: '#848e9c' }}>
           <div>{openPositions} open trades</div>
-          <div>{display(capital)} free capital</div>
+          <div>{display(freeCapital)} available</div>
         </div>
       </div>
 
@@ -189,7 +197,11 @@ export default function UserStatsPage() {
           <div className="text-2xl font-bold" style={{ color: '#555' }}>→</div>
           <div>
             <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Portfolio now</div>
-            <div className="text-lg font-bold" style={{ color: '#e8e8e8' }}>{display(totalPortfolioApprox)}</div>
+            <div className="text-lg font-bold" style={{ color: '#e8e8e8' }}>{display(totalPortfolio)}</div>
+          </div>
+          <div>
+            <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Available</div>
+            <div className="text-lg font-bold" style={{ color: '#e8e8e8' }}>{display(freeCapital)}</div>
           </div>
           <div className="ml-auto text-right">
             <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Total profit made</div>
