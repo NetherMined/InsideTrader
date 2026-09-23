@@ -1,0 +1,24 @@
+# Docker build context excludes
+.git/
+.gitignore
+.env
+.env.*
+*.md
+trade.zip
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+bot/analysis/models/*.pkl
+bot/analysis/models/*.joblib
+postgres_data/
+redis_data/
+logs/
+*.log
+.DS_Store
+.vscode/
+.idea/
