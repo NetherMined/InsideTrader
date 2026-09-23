@@ -100,12 +100,17 @@ async def _analyse_symbol(symbol: str) -> dict | None:
     df, feat_df, X, y_reg, y_cls = await asyncio.to_thread(
         _prepare_features, df_raw, settings.daily_target_percent / 2
     )
-    if len(X) < 50:
+    if len(X) < 100:
         logger.debug(f"{symbol}: not enough clean rows ({len(X)}), skipping")
         return None
 
     predictor = PricePredictor(symbol)
     loaded = predictor.load()
+
+    # Force retrain if model is stale (>24h old) — prevents regime-bias from persisting
+    if loaded and predictor.is_stale():
+        logger.info(f"{symbol}: model is stale (>24h), retraining with latest data")
+        loaded = False
 
     if not loaded:
         split = int(len(X) * 0.8)
@@ -119,16 +124,19 @@ async def _analyse_symbol(symbol: str) -> dict | None:
 
         predictor.save()
 
-        # Backtest skipped for speed — remove this block to enable backtesting
-        # if len(X_test) > 10 and len(df_test) > 10:
-        #     pred_reg_test = pd.Series(predictor._regressor.predict(X_test), index=range(len(X_test)))
-        #     pred_proba_test = pd.Series(
-        #         predictor._classifier.predict_proba(X_test)[:, 1], index=range(len(X_test))
-        #     )
-        #     await run_backtest(
-        #         symbol, df_test, pred_reg_test, pred_proba_test,
-        #         settings.stop_loss_percent, settings.take_profit_percent, settings.futures_leverage,
-        #     )
+        if len(X_test) > 10 and len(df_test) > 10:
+            try:
+                pred_reg_test = pd.Series(predictor._regressor.predict(X_test), index=range(len(X_test)))
+                cls_idx = list(predictor._classifier.classes_).index(1) if 1 in predictor._classifier.classes_ else 1
+                pred_proba_test = pd.Series(
+                    predictor._classifier.predict_proba(X_test)[:, cls_idx], index=range(len(X_test))
+                )
+                await run_backtest(
+                    symbol, df_test, pred_reg_test, pred_proba_test,
+                    settings.stop_loss_percent, settings.take_profit_percent, settings.futures_leverage,
+                )
+            except Exception as e:
+                logger.warning(f"{symbol}: backtest failed ({e}), continuing")
 
     X_latest = get_X(feat_df.dropna(subset=["rsi", "adx", "atr"])).tail(1)
     if X_latest.empty or X_latest.isnull().any().any():

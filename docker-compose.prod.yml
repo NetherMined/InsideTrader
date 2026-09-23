@@ -79,9 +79,13 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${PROD_URL:-}
+        NEXT_PUBLIC_API_KEY: ${DASHBOARD_SECRET_KEY:-change_this_secret}
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: ${PROD_URL:-}
+      NEXT_PUBLIC_API_KEY: ${DASHBOARD_SECRET_KEY:-change_this_secret}
     depends_on:
       - api
     deploy:

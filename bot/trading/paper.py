@@ -28,6 +28,9 @@ async def get_paper_capital(redis: aioredis.Redis) -> float:
 async def update_paper_capital(redis: aioredis.Redis, delta_usdt: float) -> float:
     current = await get_paper_capital(redis)
     new_val = current + delta_usdt
+    if new_val < 0:
+        logger.warning(f"Paper capital would go negative (${new_val:.2f}), clamping to 0")
+        new_val = 0.0
     await redis.set(PAPER_CAPITAL_KEY, str(new_val))
     return new_val
 

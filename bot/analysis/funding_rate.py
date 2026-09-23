@@ -78,6 +78,10 @@ async def fetch_funding_rates(symbols: list[str]) -> dict[str, dict]:
     return results
 
 
+FUNDING_SIGNAL_THRESHOLD = 0.0003   # 0.03% per 8h — meaningful funding signal
+FUNDING_EXTREME_THRESHOLD = 0.0005  # 0.05% per 8h — arb opportunity, override ML direction
+
+
 def get_funding_signal(funding_rate: float) -> str:
     """Return trading signal based on funding rate.
 
@@ -85,22 +89,30 @@ def get_funding_signal(funding_rate: float) -> str:
     Negative rate → LONG collects funding
     Near zero → no funding signal
     """
-    if funding_rate > 0.0001:
+    if funding_rate > FUNDING_SIGNAL_THRESHOLD:
         return "SHORT"
-    elif funding_rate < -0.0001:
+    elif funding_rate < -FUNDING_SIGNAL_THRESHOLD:
         return "LONG"
     return "NONE"
+
+
+def is_extreme_funding(funding_rate: float) -> bool:
+    """Return True if funding rate is extreme enough to justify an arb trade.
+
+    At this level (>=0.05% per 8h = ~54% annualised), the funding payment
+    is large enough to enter the collecting side regardless of ML direction.
+    """
+    return abs(funding_rate) >= FUNDING_EXTREME_THRESHOLD
 
 
 def should_avoid_futures(funding_rate: float, confidence: float, threshold: float = 0.0005) -> bool:
     """Return True if FUTURES mode should be avoided due to unfavorable funding.
 
-    If funding rate exceeds threshold AND confidence is below threshold,
-    prefer SPOT to avoid paying funding on a low-confidence trade.
+    Avoids paying significant funding on a low-confidence trade.
     """
-    if funding_rate > threshold and confidence < 0.75:
+    if funding_rate > threshold and confidence < 0.80:
         return True
-    if funding_rate < -threshold and confidence < 0.75:
+    if funding_rate < -threshold and confidence < 0.80:
         return True
     return False
 

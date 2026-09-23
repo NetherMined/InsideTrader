@@ -174,3 +174,40 @@ export interface LiveMode {
   live_trading_enabled: boolean;
   use_testnet: boolean;
 }
+
+export interface StartupStatus {
+  state: string;
+  awaiting_confirmation: boolean;
+  data_feed_active: boolean;
+  price_feeds_count: number;
+  paper_mode: boolean;
+  live_enabled: boolean;
+  use_testnet: boolean;
+  capital_usdt: number;
+  settings: {
+    trading_mode: string;
+    max_concurrent_trades: number;
+    confidence_threshold: number;
+    stop_loss_percent: number;
+    take_profit_percent: number;
+    daily_loss_limit_percent: number;
+    futures_leverage: number;
+    min_daily_trades: number;
+  };
+}
+
+export interface MarketSentiment {
+  sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  strength: string;
+  advance_ratio: number;
+  advancing: number;
+  declining: number;
+  neutral_count: number;
+  total_symbols: number;
+  avg_change_pct: number;
+  top_gainers: string[];
+  top_losers: string[];
+  strategy: string;
+  estimated_daily_profit_usdt: number;
+  estimated_daily_profit_pct: number;
+}

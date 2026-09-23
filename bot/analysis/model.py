@@ -6,6 +6,7 @@ direction) which serves as the confidence score.
 """
 
 import os
+import time
 import joblib
 import numpy as np
 import pandas as pd
@@ -17,7 +18,8 @@ from loguru import logger
 from bot.analysis.features import FEATURE_COLS
 
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
-MIN_TRAIN_ROWS = 300
+MIN_TRAIN_ROWS = 500  # raised from 300 — avoids overfitting to short bearish/bullish windows
+MODEL_MAX_AGE_HOURS = 24  # force retrain after 24h so models don't stay biased to old regimes
 
 
 class PricePredictor:
@@ -64,6 +66,14 @@ class PricePredictor:
             X, y_reg, y_cls, test_size=0.2, shuffle=False
         )
 
+        # Balance classes so model doesn't learn to predict whichever direction dominates recent history
+        pos_count = int((yc_train == 1).sum())
+        neg_count = int((yc_train == 0).sum())
+        if pos_count > 0 and neg_count > 0:
+            scale_pos_weight = neg_count / pos_count
+            self._classifier.set_params(scale_pos_weight=scale_pos_weight)
+            logger.debug(f"{self.symbol}: class balance UP={pos_count} DOWN={neg_count} scale_pos_weight={scale_pos_weight:.2f}")
+
         self._regressor.fit(X_train, yr_train)
         self._classifier.fit(X_train, yc_train)
         self._trained = True
@@ -88,7 +98,8 @@ class PricePredictor:
     def predict(self, X: pd.DataFrame) -> tuple[float, float]:
         """Return (predicted_change_pct, confidence).
 
-        Confidence is the classifier's probability of a correct directional move.
+        Confidence is the classifier's probability of a correct directional move,
+        capped at 0.92 to prevent overconfident predictions from dominating sizing.
         """
         if not self._trained:
             return 0.0, 0.0
@@ -98,14 +109,36 @@ class PricePredictor:
             return 0.0, 0.0
 
         predicted_change = float(self._regressor.predict(row)[0])
+
+        if not (-100 < predicted_change < 500):
+            logger.warning(f"{self.symbol}: invalid prediction change={predicted_change:.2f}, returning 0")
+            return 0.0, 0.0
+
         proba = self._classifier.predict_proba(row)[0]
+        classes = list(self._classifier.classes_)
 
         if predicted_change >= 0:
-            confidence = float(proba[1])
+            idx = classes.index(1) if 1 in classes else -1
         else:
-            confidence = float(proba[0])
+            idx = classes.index(0) if 0 in classes else 0
+
+        if 0 <= idx < len(proba):
+            confidence = float(proba[idx])
+        else:
+            confidence = float(max(proba))
+
+        confidence = max(0.0, min(confidence, 0.92))
 
         return predicted_change, confidence
+
+    def is_stale(self, max_age_hours: int = MODEL_MAX_AGE_HOURS) -> bool:
+        """Return True if the saved model is older than max_age_hours."""
+        safe_symbol = self.symbol.replace("/", "_")
+        reg_path = os.path.join(MODELS_DIR, f"{safe_symbol}_reg.pkl")
+        if not os.path.exists(reg_path):
+            return True
+        age_hours = (time.time() - os.path.getmtime(reg_path)) / 3600
+        return age_hours > max_age_hours
 
     def save(self) -> None:
         os.makedirs(MODELS_DIR, exist_ok=True)
@@ -124,8 +157,11 @@ class PricePredictor:
             return False
 
         loaded_cols = joblib.load(cols_path)
-        if loaded_cols != FEATURE_COLS:
+        if set(loaded_cols) != set(FEATURE_COLS):
             logger.info(f"{self.symbol}: feature set changed ({len(loaded_cols)} → {len(FEATURE_COLS)} cols), retraining")
+            return False
+        if loaded_cols != FEATURE_COLS:
+            logger.warning(f"{self.symbol}: feature column order differs from current code, retraining for consistency")
             return False
 
         self._regressor = joblib.load(reg_path)

@@ -124,8 +124,8 @@ export default function UserStatsPage() {
   const openPositions = status?.open_trades ?? 0;
 
   const netRealizedProfit = (allTime?.total_profit_usdt ?? 0) + (allTime?.total_loss_usdt ?? 0);
-  const totalPortfolioApprox = netRealizedProfit + startingCapital;
-  const portfolioGainPct = ((totalPortfolioApprox - startingCapital) / startingCapital) * 100;
+  const totalPortfolioApprox = capital > 0 ? capital : netRealizedProfit + startingCapital;
+  const portfolioGainPct = startingCapital > 0 ? ((totalPortfolioApprox - startingCapital) / startingCapital) * 100 : 0;
 
   const wins = allTime?.win_count ?? 0;
   const losses = allTime?.loss_count ?? 0;
@@ -260,10 +260,10 @@ export default function UserStatsPage() {
             sub={`${todayWins} wins · ${todayLosses} losses`}
           />
           <BigStat
-            label="Bot's Daily Target"
-            value={`${status?.daily_pnl_pct?.toFixed(2) ?? '0.00'}%`}
-            sub="Daily P&L %"
-            color={(status?.daily_pnl_pct ?? 0) >= 0 ? '#0ecb81' : '#f6465d'}
+            label="Daily P&L %"
+            value={`${startingCapital > 0 ? ((status?.daily_pnl_usdt ?? 0) / startingCapital * 100).toFixed(2) : '0.00'}%`}
+            sub={`${display(status?.daily_pnl_usdt ?? 0)} today`}
+            color={(status?.daily_pnl_usdt ?? 0) >= 0 ? '#0ecb81' : '#f6465d'}
           />
         </div>
       </div>

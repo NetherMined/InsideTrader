@@ -15,6 +15,7 @@ import asyncio
 import json
 import sys
 
+import ccxt.async_support as ccxt
 import redis.asyncio as aioredis
 from loguru import logger
 
@@ -44,6 +45,31 @@ def setup_logging() -> None:
         retention="30 days",
         compression="gz",
     )
+
+
+async def check_futures_position_mode() -> None:
+    """Warn and exit if Binance futures account is in Hedge Mode (One-Way required)."""
+    if settings.paper_trading_mode or settings.use_testnet:
+        return
+    exchange = ccxt.binance({
+        "apiKey": settings.binance_api_key,
+        "secret": settings.binance_api_secret,
+        "options": {"defaultType": "future"},
+    })
+    try:
+        result = await exchange.fapiPrivateGetPositionSideDual()
+        if result.get("dualSidePosition"):
+            logger.critical(
+                "Binance futures account is in Hedge Mode. "
+                "InsideTrader requires One-Way mode. "
+                "Disable Hedge Mode in Binance > Preferences > Position Mode, then restart."
+            )
+            sys.exit(1)
+        logger.info("Futures position mode: One-Way (OK)")
+    except Exception as e:
+        logger.warning(f"Could not verify futures position mode: {e}")
+    finally:
+        await exchange.close()
 
 
 async def startup_checks() -> None:
@@ -125,6 +151,7 @@ async def main() -> None:
     logger.info("=" * 60)
 
     await startup_checks()
+    await check_futures_position_mode()
     await init_db()
 
     logger.info("Scanning Binance markets...")
@@ -156,16 +183,29 @@ async def main() -> None:
     except Exception as corr_err:
         logger.warning(f"Initial correlation matrix failed: {corr_err}")
 
+    async def _guarded(name: str, coro):
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Task '{name}' crashed: {exc}")
+            stop_event.set()
+
+    tasks = [
+        asyncio.create_task(_guarded("trading_engine", run_trading_engine(ranked_store, redis, stop_event))),
+        asyncio.create_task(_guarded("price_stream", poll_prices(pairs, stop_event))),
+        asyncio.create_task(_guarded("hourly_refresh", hourly_refresh(pairs, redis, stop_event, ranked_store))),
+        asyncio.create_task(_guarded("periodic_retrain", periodic_retrain(pairs, stop_event))),
+    ]
     try:
-        await asyncio.gather(
-            run_trading_engine(ranked_store, redis, stop_event),
-            poll_prices(pairs, stop_event),
-            hourly_refresh(pairs, redis, stop_event, ranked_store),
-            periodic_retrain(pairs, stop_event),
-        )
-    except KeyboardInterrupt:
+        await asyncio.gather(*tasks)
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutdown signal received")
         stop_event.set()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         await redis.aclose()
 

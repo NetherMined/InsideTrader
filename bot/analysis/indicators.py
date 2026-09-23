@@ -8,7 +8,7 @@ import warnings
 import pandas as pd
 import pandas_ta as ta
 
-MIN_ROWS = 100
+MIN_ROWS = 300
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:

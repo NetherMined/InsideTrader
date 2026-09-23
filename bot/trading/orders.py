@@ -50,30 +50,60 @@ async def get_account_balance(use_testnet: bool | None = None) -> float:
         await exchange.close()
 
 
+def _extract_fill_price(order: dict) -> float | None:
+    """Extract fill price from ccxt order, returning None if unavailable."""
+    avg = order.get("average")
+    if avg is not None:
+        price = float(avg)
+        if price > 0:
+            return price
+    cost = order.get("cost")
+    amount = order.get("filled") or order.get("amount")
+    if cost and amount and float(amount) > 0:
+        price = float(cost) / float(amount)
+        if price > 0:
+            return price
+    return None
+
+
 async def place_spot_market_buy(symbol: str, quantity: float, use_testnet: bool | None = None) -> dict:
     exchange = _spot_exchange(use_testnet)
     try:
         order = await exchange.create_market_buy_order(symbol, quantity)
-        logger.info(f"SPOT BUY {symbol}: qty={quantity} id={order['id']}")
-        return {"ok": True, "order_id": str(order["id"]), "fill_price": float(order.get("average") or 0)}
+        fill_price = _extract_fill_price(order)
+        if fill_price is None:
+            logger.error(f"SPOT BUY {symbol}: order {order.get('id')} has no valid fill price (status={order.get('status')})")
+            return {"ok": False, "error": "Order placed but fill price unavailable"}
+        logger.info(f"SPOT BUY {symbol}: qty={quantity} id={order['id']} fill=${fill_price:.6f}")
+        return {"ok": True, "order_id": str(order["id"]), "fill_price": fill_price}
     except Exception as e:
         logger.error(f"SPOT BUY failed {symbol}: {e}")
         return {"ok": False, "error": str(e)}
     finally:
-        await exchange.close()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
 
 async def place_spot_market_sell(symbol: str, quantity: float, use_testnet: bool | None = None) -> dict:
     exchange = _spot_exchange(use_testnet)
     try:
         order = await exchange.create_market_sell_order(symbol, quantity)
-        logger.info(f"SPOT SELL {symbol}: qty={quantity} id={order['id']}")
-        return {"ok": True, "order_id": str(order["id"]), "fill_price": float(order.get("average") or 0)}
+        fill_price = _extract_fill_price(order)
+        if fill_price is None:
+            logger.error(f"SPOT SELL {symbol}: order {order.get('id')} has no valid fill price (status={order.get('status')})")
+            return {"ok": False, "error": "Order placed but fill price unavailable"}
+        logger.info(f"SPOT SELL {symbol}: qty={quantity} id={order['id']} fill=${fill_price:.6f}")
+        return {"ok": True, "order_id": str(order["id"]), "fill_price": fill_price}
     except Exception as e:
         logger.error(f"SPOT SELL failed {symbol}: {e}")
         return {"ok": False, "error": str(e)}
     finally:
-        await exchange.close()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
 
 def _futures_symbol(symbol: str) -> str:
@@ -85,15 +115,26 @@ async def place_futures_market_buy(symbol: str, quantity: float, leverage: int, 
     exchange = _futures_exchange(use_testnet)
     fsym = _futures_symbol(symbol)
     try:
-        await exchange.set_leverage(leverage, fsym)
+        try:
+            await exchange.set_leverage(leverage, fsym)
+        except Exception as e:
+            logger.error(f"FUTURES set_leverage failed {symbol}: {e}")
+            return {"ok": False, "error": f"leverage_error: {e}"}
         order = await exchange.create_market_buy_order(fsym, quantity)
-        logger.info(f"FUTURES LONG {symbol}: qty={quantity} lev={leverage}x id={order['id']}")
-        return {"ok": True, "order_id": str(order["id"]), "fill_price": float(order.get("average") or 0)}
+        fill_price = _extract_fill_price(order)
+        if fill_price is None:
+            logger.error(f"FUTURES LONG {symbol}: order {order.get('id')} has no valid fill price")
+            return {"ok": False, "error": "Order placed but fill price unavailable"}
+        logger.info(f"FUTURES LONG {symbol}: qty={quantity} lev={leverage}x id={order['id']} fill=${fill_price:.6f}")
+        return {"ok": True, "order_id": str(order["id"]), "fill_price": fill_price}
     except Exception as e:
         logger.error(f"FUTURES BUY failed {symbol}: {e}")
         return {"ok": False, "error": str(e)}
     finally:
-        await exchange.close()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
 
 async def place_futures_market_sell(symbol: str, quantity: float, leverage: int, use_testnet: bool | None = None) -> dict:
@@ -101,15 +142,26 @@ async def place_futures_market_sell(symbol: str, quantity: float, leverage: int,
     exchange = _futures_exchange(use_testnet)
     fsym = _futures_symbol(symbol)
     try:
-        await exchange.set_leverage(leverage, fsym)
+        try:
+            await exchange.set_leverage(leverage, fsym)
+        except Exception as e:
+            logger.error(f"FUTURES set_leverage failed {symbol}: {e}")
+            return {"ok": False, "error": f"leverage_error: {e}"}
         order = await exchange.create_market_sell_order(fsym, quantity)
-        logger.info(f"FUTURES SHORT {symbol}: qty={quantity} lev={leverage}x id={order['id']}")
-        return {"ok": True, "order_id": str(order["id"]), "fill_price": float(order.get("average") or 0)}
+        fill_price = _extract_fill_price(order)
+        if fill_price is None:
+            logger.error(f"FUTURES SHORT {symbol}: order {order.get('id')} has no valid fill price")
+            return {"ok": False, "error": "Order placed but fill price unavailable"}
+        logger.info(f"FUTURES SHORT {symbol}: qty={quantity} lev={leverage}x id={order['id']} fill=${fill_price:.6f}")
+        return {"ok": True, "order_id": str(order["id"]), "fill_price": fill_price}
     except Exception as e:
         logger.error(f"FUTURES SHORT failed {symbol}: {e}")
         return {"ok": False, "error": str(e)}
     finally:
-        await exchange.close()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
 
 async def place_futures_market_close(symbol: str, quantity: float, use_testnet: bool | None = None) -> dict:
@@ -119,13 +171,20 @@ async def place_futures_market_close(symbol: str, quantity: float, use_testnet: 
         order = await exchange.create_market_sell_order(
             fsym, quantity, params={"reduceOnly": True}
         )
-        logger.info(f"FUTURES CLOSE {symbol}: qty={quantity} id={order['id']}")
-        return {"ok": True, "order_id": str(order["id"]), "fill_price": float(order.get("average") or 0)}
+        fill_price = _extract_fill_price(order)
+        if fill_price is None:
+            logger.error(f"FUTURES CLOSE {symbol}: order {order.get('id')} has no valid fill price")
+            return {"ok": False, "error": "Order placed but fill price unavailable"}
+        logger.info(f"FUTURES CLOSE {symbol}: qty={quantity} id={order['id']} fill=${fill_price:.6f}")
+        return {"ok": True, "order_id": str(order["id"]), "fill_price": fill_price}
     except Exception as e:
         logger.error(f"FUTURES CLOSE failed {symbol}: {e}")
         return {"ok": False, "error": str(e)}
     finally:
-        await exchange.close()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
 
 async def get_current_price(symbol: str) -> float | None:

@@ -128,9 +128,39 @@ class RiskManager:
 
     async def activate_defensive_mode(self) -> None:
         await self._redis.set(DEFENSIVE_KEY, "1")
+        for key, redis_key in [
+            ("mode", MODE_KEY),
+            ("confidence_threshold", CONFIDENCE_KEY),
+            ("stop_loss_percent", SL_PCT_KEY),
+            ("take_profit_percent", TP_PCT_KEY),
+            ("max_concurrent_trades", MAX_CONCURRENT_KEY),
+            ("futures_leverage", LEVERAGE_KEY),
+            ("negative_trade_timeout_minutes", NEG_TIMEOUT_KEY),
+            ("min_daily_trades", MIN_DAILY_TRADES_KEY),
+            ("min_concurrent_trades", MIN_CONCURRENT_KEY),
+        ]:
+            val = DEFENSIVE_PARAMS_OVERRIDE.get(key)
+            if val is not None:
+                await self._redis.set(f"bot:pre_defensive:{key}", await self._redis.get(redis_key) or "")
+                await self._redis.set(redis_key, str(val))
         logger.warning("Defensive mode activated — switching to conservative SPOT-only strategy")
 
     async def exit_defensive_mode(self) -> None:
+        for key, redis_key in [
+            ("mode", MODE_KEY),
+            ("confidence_threshold", CONFIDENCE_KEY),
+            ("stop_loss_percent", SL_PCT_KEY),
+            ("take_profit_percent", TP_PCT_KEY),
+            ("max_concurrent_trades", MAX_CONCURRENT_KEY),
+            ("futures_leverage", LEVERAGE_KEY),
+            ("negative_trade_timeout_minutes", NEG_TIMEOUT_KEY),
+            ("min_daily_trades", MIN_DAILY_TRADES_KEY),
+            ("min_concurrent_trades", MIN_CONCURRENT_KEY),
+        ]:
+            saved = await self._redis.get(f"bot:pre_defensive:{key}")
+            if saved:
+                await self._redis.set(redis_key, saved)
+                await self._redis.delete(f"bot:pre_defensive:{key}")
         await self._redis.set(DEFENSIVE_KEY, "0")
         await self._redis.set(KILL_KEY, "0")
         logger.info("Defensive mode exited — portfolio recovered, resuming normal strategy")
@@ -151,11 +181,23 @@ class RiskManager:
 
     async def _redis_float(self, key: str, default: float) -> float:
         val = await self._redis.get(key)
-        return float(val) if val else default
+        if val is None:
+            return default
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid float in Redis[{key}]={val!r}, using default={default}")
+            return default
 
     async def _redis_int(self, key: str, default: int) -> int:
         val = await self._redis.get(key)
-        return int(val) if val else default
+        if val is None:
+            return default
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid int in Redis[{key}]={val!r}, using default={default}")
+            return default
 
     async def get_effective_params(self) -> dict:
         mode_raw = await self._redis.get(MODE_KEY)
@@ -193,7 +235,7 @@ class RiskManager:
     ) -> tuple[bool, str]:
         await self._reset_if_new_day()
 
-        if await self.is_kill_switch_active() and not await self.is_defensive_mode():
+        if await self.is_kill_switch_active():
             return False, "Kill switch active — emergency stop"
 
         cmd = await self._redis.get(COMMAND_KEY)
@@ -220,10 +262,16 @@ class RiskManager:
         return int(val or 0)
 
     async def on_trade_opened(self) -> None:
-        await self._redis.incr(OPEN_COUNT_KEY)
         await self._redis.incr(DAILY_TRADE_COUNT_KEY)
+        # Note: open count is tracked by DB position count, not Redis counter
 
-    async def on_trade_closed(self, pnl_pct: float, daily_loss_limit: float | None = None, pnl_usdt: float = 0.0) -> bool:
+    async def on_trade_closed(
+        self,
+        pnl_pct: float,
+        daily_loss_limit: float | None = None,
+        pnl_usdt: float = 0.0,
+        capital_usdt: float = 0.0,
+    ) -> bool:
         """Record closed trade P&L. Returns True if kill switch was triggered."""
         await self._reset_if_new_day()
 
@@ -232,26 +280,30 @@ class RiskManager:
         await self._redis.set(DAILY_PNL_KEY, str(new_val))
 
         usdt_val = float(await self._redis.get(DAILY_PNL_USDT_KEY) or 0.0)
-        await self._redis.set(DAILY_PNL_USDT_KEY, str(usdt_val + pnl_usdt))
-
-        count = max(0, int(await self._redis.get(OPEN_COUNT_KEY) or 0) - 1)
-        await self._redis.set(OPEN_COUNT_KEY, str(count))
+        new_usdt_val = usdt_val + pnl_usdt
+        await self._redis.set(DAILY_PNL_USDT_KEY, str(new_usdt_val))
 
         await self._redis.rpush(TRADE_RETURNS_KEY, str(pnl_pct))
         await self._redis.ltrim(TRADE_RETURNS_KEY, -500, -1)
 
-        limit = daily_loss_limit if daily_loss_limit is not None else settings.daily_loss_limit_percent
-        if new_val <= -limit:
+        limit_pct = daily_loss_limit if daily_loss_limit is not None else settings.daily_loss_limit_percent
+        if capital_usdt > 0:
+            limit_usdt = capital_usdt * limit_pct / 100
+            triggered = new_usdt_val <= -limit_usdt
+        else:
+            triggered = new_val <= -limit_pct
+
+        if triggered:
             await self._redis.set(KILL_KEY, "1")
             await self.activate_defensive_mode()
             await self._redis.set(STATUS_KEY, json.dumps({
                 "state": "defensive",
-                "reason": f"Daily loss limit hit: {new_val:.2f}% — switched to defensive strategy",
+                "reason": f"Daily loss limit hit: ${new_usdt_val:.2f} ({new_val:.2f}%) — switched to defensive strategy",
                 "ts": datetime.now(timezone.utc).isoformat(),
             }))
             logger.critical(
-                f"DEFENSIVE MODE TRIGGERED — daily loss {new_val:.2f}% "
-                f"exceeded limit of -{limit}% — switching to conservative strategy"
+                f"DEFENSIVE MODE TRIGGERED — daily loss ${new_usdt_val:.2f} ({new_val:.2f}%) "
+                f"exceeded limit of -{limit_pct}% — switching to conservative strategy"
             )
             await telegram.notify_kill_switch(new_val)
             await ev.publish_kill_switch(self._redis, new_val)

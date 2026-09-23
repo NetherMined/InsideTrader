@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query, Body
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from pydantic import BaseModel
@@ -46,11 +46,28 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[o.strip() for o in settings.cors_allowed_origins.split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+_cors_origins = [o.strip() for o in settings.cors_allowed_origins.split(",") if o.strip()]
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        api_key = request.headers.get("X-Api-Key", "")
+        if api_key != settings.dashboard_secret_key:
+            from fastapi.responses import JSONResponse
+            response = JSONResponse({"detail": "Invalid or missing API key"}, status_code=403)
+            origin = request.headers.get("origin", "")
+            if origin in _cors_origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+            return response
+    return await call_next(request)
 
 
 async def get_redis() -> aioredis.Redis:
@@ -555,7 +572,7 @@ async def get_bot_status():
                 bot_capital = state_data.get("capital_usdt")
                 capital = float(bot_capital) if bot_capital is not None else _starting_capital
         daily_pnl_usdt_raw = await redis.get(_DAILY_PNL_USDT_KEY)
-        daily_pnl_usdt = float(daily_pnl_usdt_raw) if daily_pnl_usdt_raw else round(daily_pnl * _starting_capital / 100, 4)
+        daily_pnl_usdt = float(daily_pnl_usdt_raw) if daily_pnl_usdt_raw else round(daily_pnl * capital / 100, 4)
 
         goal_raw = await redis.get(_GOAL_KEY)
         goal_amount_usdt = 0.0
@@ -603,7 +620,7 @@ async def get_bot_status():
             kill_switch=kill,
             goal_amount_usdt=goal_amount_usdt,
             goal_period_hours=_GOAL_PERIOD_HOURS,
-            goal_progress_usdt=round(pnl_summary["total_profit_usdt"] + pnl_summary["total_loss_usdt"], 4),
+            goal_progress_usdt=round(daily_pnl_usdt, 4),
             goal_max_usdt=goal_max_usdt,
             total_profit_usdt=pnl_summary["total_profit_usdt"],
             total_loss_usdt=pnl_summary["total_loss_usdt"],
@@ -637,7 +654,22 @@ async def get_goal():
             except Exception:
                 pass
 
-        capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
+        paper_raw = await redis.get(_LIVE_MODE_KEYS["paper_trading_mode"])
+        is_paper = (paper_raw == "true") if paper_raw is not None else settings.paper_trading_mode
+        if is_paper:
+            capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
+        else:
+            try:
+                testnet_raw = await redis.get(_LIVE_MODE_KEYS["use_testnet"])
+                use_testnet = (testnet_raw == "true") if testnet_raw is not None else settings.use_testnet
+                exchange = _get_exchange(use_testnet)
+                try:
+                    bal = await exchange.fetch_balance()
+                    capital = float(bal.get("USDT", {}).get("free", 0.0))
+                finally:
+                    await exchange.close()
+            except Exception:
+                capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
         max_allowed_usdt = round(capital * _MAX_GOAL_FACTOR, 2)
 
         return GoalResponse(amount_usdt=amount_usdt, period_hours=_GOAL_PERIOD_HOURS, max_allowed_usdt=max_allowed_usdt)
@@ -652,7 +684,22 @@ async def set_goal(request: SetGoalRequest):
 
     redis = await get_redis()
     try:
-        capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
+        paper_raw = await redis.get(_LIVE_MODE_KEYS["paper_trading_mode"])
+        is_paper = (paper_raw == "true") if paper_raw is not None else settings.paper_trading_mode
+        if is_paper:
+            capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
+        else:
+            try:
+                testnet_raw = await redis.get(_LIVE_MODE_KEYS["use_testnet"])
+                use_testnet = (testnet_raw == "true") if testnet_raw is not None else settings.use_testnet
+                exchange = _get_exchange(use_testnet)
+                try:
+                    bal = await exchange.fetch_balance()
+                    capital = float(bal.get("USDT", {}).get("free", 0.0))
+                finally:
+                    await exchange.close()
+            except Exception:
+                capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
         max_allowed_usdt = round(capital * _MAX_GOAL_FACTOR, 2)
 
         if request.amount_usdt > max_allowed_usdt:
@@ -741,6 +788,7 @@ async def set_capital(request: SetCapitalRequest):
         await redis.set(_PAPER_CAPITAL_KEY, str(request.capital_usdt))
         await redis.set("paper:starting_capital_usdt", str(request.capital_usdt))
         await redis.set("bot:kill_switch", "0")
+        await redis.set("bot:defensive_mode", "0")
         await redis.set("bot:daily_pnl", "0.0")
         await redis.set("bot:daily_pnl_usdt", "0.0")
         await redis.set("bot:command", "restart")
@@ -832,7 +880,7 @@ async def set_trade_limits(request: SetTradeLimitsRequest):
     try:
         field_map = {
             "max_concurrent_trades": (_MAX_CONCURRENT_KEY, 1, 50),
-            "confidence_threshold": (_CONFIDENCE_KEY, 0.40, 0.95),
+            "confidence_threshold": (_CONFIDENCE_KEY, 0.55, 0.95),
             "stop_loss_percent": (_SL_PCT_KEY, 0.5, 10.0),
             "take_profit_percent": (_TP_PCT_KEY, 0.5, 15.0),
             "daily_loss_limit_percent": (_DAILY_LOSS_LIMIT_KEY, 2.0, 25.0),
@@ -858,6 +906,94 @@ async def set_trade_limits(request: SetTradeLimitsRequest):
             await redis.set(_MODE_KEY, request.trading_mode)
 
         return await _read_trade_limits(redis)
+    finally:
+        await redis.aclose()
+
+
+@app.get("/api/v1/bot/startup-status")
+async def get_startup_status():
+    """Return readiness checks for the startup confirmation modal."""
+    redis = await get_redis()
+    try:
+        status_raw = await redis.get("bot:status")
+        state = "unknown"
+        if status_raw:
+            try:
+                state = json.loads(status_raw).get("state", "unknown")
+            except Exception:
+                pass
+
+        stream_count_raw = await redis.get("bot:price_stream_active")
+        price_feed_count = int(stream_count_raw) if stream_count_raw else 0
+        prices_active = price_feed_count > 0
+
+        paper_raw = await redis.get(_LIVE_MODE_KEYS["paper_trading_mode"])
+        is_paper = (paper_raw == "true") if paper_raw is not None else settings.paper_trading_mode
+        live_raw = await redis.get(_LIVE_MODE_KEYS["live_trading_enabled"])
+        live_enabled = (live_raw == "true") if live_raw is not None else settings.live_trading_enabled
+        testnet_raw = await redis.get(_LIVE_MODE_KEYS["use_testnet"])
+        use_testnet = (testnet_raw == "true") if testnet_raw is not None else settings.use_testnet
+
+        limits = await _read_trade_limits(redis)
+
+        if is_paper:
+            capital = float(await redis.get("paper:capital_usdt") or settings.starting_capital_usdt)
+        else:
+            try:
+                exchange = _get_exchange(use_testnet)
+                try:
+                    bal = await exchange.fetch_balance()
+                    capital = float(bal.get("USDT", {}).get("free", 0.0))
+                finally:
+                    await exchange.close()
+            except Exception:
+                capital = float(await redis.get("paper:capital_usdt") or settings.starting_capital_usdt)
+
+        return {
+            "state": state,
+            "awaiting_confirmation": state == "awaiting_confirmation",
+            "data_feed_active": prices_active,
+            "price_feeds_count": price_feed_count,
+            "paper_mode": is_paper,
+            "live_enabled": live_enabled,
+            "use_testnet": use_testnet,
+            "capital_usdt": round(capital, 2),
+            "settings": {
+                "trading_mode": limits.trading_mode,
+                "max_concurrent_trades": limits.max_concurrent_trades,
+                "confidence_threshold": limits.confidence_threshold,
+                "stop_loss_percent": limits.stop_loss_percent,
+                "take_profit_percent": limits.take_profit_percent,
+                "daily_loss_limit_percent": limits.daily_loss_limit_percent,
+                "futures_leverage": limits.futures_leverage,
+                "min_daily_trades": limits.min_daily_trades,
+            },
+        }
+    finally:
+        await redis.aclose()
+
+
+@app.post("/api/v1/bot/confirm-startup")
+async def confirm_startup():
+    """User confirms settings and starts trading."""
+    redis = await get_redis()
+    try:
+        status_raw = await redis.get("bot:status")
+        state = "unknown"
+        if status_raw:
+            try:
+                state = json.loads(status_raw).get("state", "unknown")
+            except Exception:
+                pass
+
+        if state != "awaiting_confirmation":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Bot is not awaiting confirmation (current state: {state})",
+            )
+
+        await redis.set("bot:command", "confirmed")
+        return {"ok": True, "message": "Trading confirmed — bot starting"}
     finally:
         await redis.aclose()
 
@@ -896,7 +1032,7 @@ async def emergency_stop():
     try:
         await redis.set("bot:command", "stop")
         await redis.set("bot:kill_switch", "1")
-        await redis.set("bot:defensive_mode", "0")
+        await redis.set("bot:defensive_mode", "1")
         return {"ok": True, "message": "Emergency stop activated — all trading halted"}
     finally:
         await redis.aclose()
@@ -1243,6 +1379,129 @@ async def get_pnl_stats(period: str = Query("all", description="1h | 24h | 7d | 
         loss_count=losses,
         net_usdt=round(profit + loss, 4),
     )
+
+
+class MarketSentimentResponse(BaseModel):
+    sentiment: str
+    strength: str
+    advance_ratio: float
+    advancing: int
+    declining: int
+    neutral_count: int
+    total_symbols: int
+    avg_change_pct: float
+    top_gainers: list[str]
+    top_losers: list[str]
+    strategy: str
+    estimated_daily_profit_usdt: float
+    estimated_daily_profit_pct: float
+
+
+@app.get("/api/v1/market/sentiment", response_model=MarketSentimentResponse)
+async def get_market_sentiment():
+    redis = await get_redis()
+    try:
+        # Prefer the bot's pre-computed sentiment (updated every 10s by price stream)
+        # Fall back to computing from individual price keys if bot hasn't populated it yet
+        cached = await redis.get("market:sentiment")
+        if cached:
+            try:
+                cached_data = json.loads(cached)
+                advance_ratio = float(cached_data.get("advance_ratio", 0.5))
+                advancing = int(cached_data.get("advancing", 0))
+                declining = int(cached_data.get("declining", 0))
+                total_symbols = int(cached_data.get("total", 0))
+                neutral_count = total_symbols - advancing - declining
+            except Exception:
+                cached = None
+
+        if not cached:
+            keys = await redis.keys("price:*")
+            prices_data = []
+            if keys:
+                values = await redis.mget(keys)
+                for raw in values:
+                    if raw:
+                        try:
+                            prices_data.append(json.loads(raw))
+                        except Exception:
+                            pass
+            advancing = sum(1 for p in prices_data if p.get("change_pct", 0) > 0)
+            declining = sum(1 for p in prices_data if p.get("change_pct", 0) < 0)
+            total_symbols = len(prices_data)
+            neutral_count = total_symbols - advancing - declining
+            advance_ratio = advancing / max(total_symbols, 1)
+
+        # Top gainers/losers from price keys
+        keys = await redis.keys("price:*")
+        prices_data = []
+        if keys:
+            values = await redis.mget(keys)
+            for raw in values:
+                if raw:
+                    try:
+                        prices_data.append(json.loads(raw))
+                    except Exception:
+                        pass
+
+        sorted_by_change = sorted(prices_data, key=lambda p: p.get("change_pct", 0), reverse=True)
+        top_gainers = [p["symbol"] for p in sorted_by_change[:3]]
+        top_losers = [p["symbol"] for p in sorted_by_change[-3:]][::-1]
+        avg_change = sum(p.get("change_pct", 0) for p in prices_data) / max(len(prices_data), 1)
+
+        if advance_ratio > 0.65:
+            sentiment, strength = "BULLISH", "Strong Bullish"
+            strategy = "Strong momentum — favor trend-following longs and breakouts. High-confidence futures signals are well-suited to current conditions."
+        elif advance_ratio > 0.55:
+            sentiment, strength = "BULLISH", "Mild Bullish"
+            strategy = "Mild upside bias — lean toward long setups on pullbacks. Keep position sizes moderate and confirm signals before entry."
+        elif advance_ratio < 0.35:
+            sentiment, strength = "BEARISH", "Strong Bearish"
+            strategy = "Risk-off environment — reduce exposure significantly. Focus on defensive shorts on overextended pairs and tighten stop-losses."
+        elif advance_ratio < 0.45:
+            sentiment, strength = "BEARISH", "Mild Bearish"
+            strategy = "Mild downside pressure — avoid aggressive longs. Consider selective shorts on high-volume pairs with clear breakdown signals."
+        else:
+            sentiment, strength = "NEUTRAL", "Neutral"
+            strategy = "Range-bound market — target mean-reversion setups at extremes. Prioritize high-confidence signals and keep position sizes conservative."
+
+        capital_raw = await redis.get("paper:capital_usdt")
+        capital = float(capital_raw) if capital_raw else 694.0
+        max_concurrent_raw = await redis.get("bot:max_concurrent_trades")
+        max_concurrent = int(max_concurrent_raw) if max_concurrent_raw else 20
+        min_daily_raw = await redis.get("bot:min_daily_trades")
+        min_daily = int(min_daily_raw) if min_daily_raw else 50
+        sl_raw = await redis.get("bot:stop_loss_percent")
+        sl_pct = float(sl_raw) / 100 if sl_raw else 0.02
+        tp_raw = await redis.get("bot:take_profit_percent")
+        tp_pct = float(tp_raw) / 100 if tp_raw else 0.03
+
+        win_rate = 0.55
+        notional_per_trade = capital / max(max_concurrent, 1)
+        expected_pnl_per_trade = notional_per_trade * (win_rate * tp_pct - (1 - win_rate) * sl_pct)
+        expected_trades = min_daily * 0.6
+        base_profit = expected_pnl_per_trade * expected_trades
+        multiplier = {"BULLISH": 1.25, "NEUTRAL": 1.0, "BEARISH": 0.65}[sentiment]
+        estimated_profit = round(base_profit * multiplier, 2)
+        estimated_profit_pct = round((estimated_profit / capital * 100) if capital > 0 else 0, 2)
+
+        return MarketSentimentResponse(
+            sentiment=sentiment,
+            strength=strength,
+            advance_ratio=round(advance_ratio, 4),
+            advancing=advancing,
+            declining=declining,
+            neutral_count=neutral_count,
+            total_symbols=total_symbols,
+            avg_change_pct=round(avg_change, 4),
+            top_gainers=top_gainers,
+            top_losers=top_losers,
+            strategy=strategy,
+            estimated_daily_profit_usdt=estimated_profit,
+            estimated_daily_profit_pct=estimated_profit_pct,
+        )
+    finally:
+        await redis.aclose()
 
 
 @app.websocket("/ws/events")

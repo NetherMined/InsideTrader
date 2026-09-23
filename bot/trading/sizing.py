@@ -10,7 +10,7 @@ Determines how much capital to allocate per trade, respecting:
 from loguru import logger
 from bot.config import settings
 
-MIN_NOTIONAL_USDT = 2.0
+MIN_NOTIONAL_USDT = 10.0
 
 
 def calculate_position_size(
@@ -47,10 +47,16 @@ def calculate_position_size(
         notional = margin * _leverage
 
     if notional < MIN_NOTIONAL_USDT:
-        logger.debug(
-            f"Position too small: ${notional:.2f} < ${MIN_NOTIONAL_USDT} minimum"
-        )
-        return 0.0, 0.0
+        # Bump up to minimum rather than rejecting — ensures trades open even when
+        # risk_pct formula gives a tiny slice (e.g. 100 trades / $189 capital = $1.89)
+        floored = min(MIN_NOTIONAL_USDT, available if mode == "SPOT" else capital_usdt * 0.15)
+        if floored < MIN_NOTIONAL_USDT:
+            logger.warning(
+                f"Insufficient capital for minimum position: ${available:.2f} available, ${MIN_NOTIONAL_USDT} minimum"
+            )
+            return 0.0, 0.0
+        logger.debug(f"Position bumped from ${notional:.2f} to minimum ${floored:.2f}")
+        notional = floored
 
     quantity = notional / price
     return round(quantity, 8), round(notional, 4)
@@ -63,15 +69,21 @@ def calculate_sl_tp_prices(
     sl_pct: float | None = None,
     tp_pct: float | None = None,
     leverage: int | None = None,
+    atr_pct: float | None = None,
 ) -> tuple[float, float]:
     """Return (stop_loss_price, take_profit_price).
 
+    When atr_pct is provided, take-profit is set dynamically to 1.5× ATR,
+    floored at 2.5% and capped at 6.0%, giving larger targets on volatile moves.
     For futures, stop-loss is tighter due to leverage magnifying losses.
-    Optional sl_pct, tp_pct, leverage override settings defaults.
     """
     _sl_pct = sl_pct if sl_pct is not None else settings.stop_loss_percent
-    _tp_pct = tp_pct if tp_pct is not None else settings.take_profit_percent
     _leverage = leverage if leverage is not None else settings.futures_leverage
+
+    if atr_pct is not None and atr_pct > 0:
+        _tp_pct = max(2.5, min(6.0, atr_pct * 1.5))
+    else:
+        _tp_pct = tp_pct if tp_pct is not None else settings.take_profit_percent
 
     if mode == "FUTURES":
         _sl_pct = _sl_pct / _leverage

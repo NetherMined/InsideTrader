@@ -25,9 +25,9 @@ class RegimeResult:
 
 # Thresholds (tunable via config)
 ADX_TRENDING = 25.0
-ADX_RANGING = 15.0
-ATR_PCT_HIGH = 5.0  # High volatility = trending or transition
-BB_WIDTH_LOW = 0.02  # Narrow bands = ranging
+ADX_RANGING = 20.0   # raised from 15 — more pairs qualify for mean-reversion grid mode
+ATR_PCT_HIGH = 5.0   # High volatility = trending or transition
+BB_WIDTH_LOW = 0.03  # Narrow bands = ranging (raised from 0.02)
 BB_WIDTH_HIGH = 0.10  # Wide bands = trending
 
 
@@ -101,13 +101,13 @@ def generate_mean_reversion_signal(rsi: float, bb_pct: float) -> dict:
     strength = 0.0
     reason = ""
 
-    if rsi < 30 and bb_pct < 0.2:
+    if rsi < 35 and bb_pct < 0.25:
         side = "BUY"
-        strength = (30 - rsi) / 30 * 0.5 + (0.2 - bb_pct) / 0.2 * 0.5
+        strength = (35 - rsi) / 35 * 0.5 + (0.25 - bb_pct) / 0.25 * 0.5
         reason = f"oversold RSI={rsi:.1f} bb_pct={bb_pct:.2f}"
-    elif rsi > 70 and bb_pct > 0.8:
+    elif rsi > 65 and bb_pct > 0.75:
         side = "SELL"
-        strength = (rsi - 70) / 30 * 0.5 + (bb_pct - 0.8) / 0.2 * 0.5
+        strength = (rsi - 65) / 35 * 0.5 + (bb_pct - 0.75) / 0.25 * 0.5
         reason = f"overbought RSI={rsi:.1f} bb_pct={bb_pct:.2f}"
 
     return {"side": side, "strength": min(strength, 1.0), "reason": reason}

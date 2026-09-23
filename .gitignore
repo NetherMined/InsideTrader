@@ -1,6 +1,9 @@
 # Credentials — never commit these
 .env
 CONFIG_REQUIRED.md
+strat.md
+update.md
+review.md
 
 # Python
 __pycache__/
