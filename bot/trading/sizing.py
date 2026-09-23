@@ -85,9 +85,9 @@ def calculate_sl_tp_prices(
     else:
         _tp_pct = tp_pct if tp_pct is not None else settings.take_profit_percent
 
-    if mode == "FUTURES":
-        _sl_pct = _sl_pct / _leverage
-        _tp_pct = _tp_pct / _leverage
+    # SL/TP are price-level percentages — NOT divided by leverage.
+    # Leverage amplifies the margin P&L (e.g. 2% SL at 5x = 10% margin loss)
+    # but the price target stays at 2% to give trades room to breathe.
 
     if side == "BUY":
         stop_loss = entry_price * (1 - _sl_pct / 100)
