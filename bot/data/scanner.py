@@ -38,26 +38,14 @@ async def scan_markets() -> list[dict]:
         exchange = _make_public_exchange(market_type)
         try:
             await exchange.load_markets()
-
-            # Pre-filter to USDT symbols from loaded markets to reduce API weight
-            if market_type == "spot":
-                usdt_symbols = [
-                    s for s, m in exchange.markets.items()
-                    if s.endswith("/USDT") and m.get("active")
-                ]
-            else:
-                usdt_symbols = [
-                    s for s, m in exchange.markets.items()
-                    if ":USDT" in s and "/USDT" in s and m.get("active")
-                ]
-
-            tickers = await exchange.fetch_tickers(usdt_symbols) if usdt_symbols else {}
+            tickers = await exchange.fetch_tickers()
 
             for symbol, ticker in tickers.items():
                 if market_type == "spot":
                     if not symbol.endswith("/USDT"):
                         continue
                 else:
+                    # USDM futures symbols: BTC/USDT:USDT — must contain :USDT
                     if ":USDT" not in symbol or "/USDT" not in symbol:
                         continue
                 market = exchange.markets.get(symbol)
