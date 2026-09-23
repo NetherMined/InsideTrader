@@ -51,6 +51,7 @@ _FUNDING_CACHE_KEY = "bot:funding_rates_cache"
 _FUNDING_CACHE_TTL = 300  # 5 minutes
 _CORR_CACHE_KEY = "bot:correlation_matrix"
 _CORR_CACHE_TTL = 3600  # 1 hour
+_SYMBOL_COOLDOWN_SECONDS = 900  # 15 min cooldown after closing a symbol before reopening
 
 
 async def _fetch_funding_rates_cached(redis: aioredis.Redis, symbols: list[str]) -> dict[str, dict]:
@@ -293,6 +294,9 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             if not close_ok:
                 continue
 
+            # Per-symbol cooldown to prevent churn (re-opening immediately after close)
+            await redis.setex(f"bot:cooldown:{symbol}", _SYMBOL_COOLDOWN_SECONDS, "1")
+
             await redis.srem(recovery_key, str(pos_id))
 
             # Estimate and record fee for this trade
@@ -333,6 +337,13 @@ async def _try_open_trade(
     regime_result: RegimeResult | None = None,
 ) -> bool:
     symbol = pair.symbol
+
+    # Per-symbol cooldown check — don't reopen a recently closed symbol
+    cooldown_active = await redis.get(f"bot:cooldown:{symbol}")
+    if cooldown_active:
+        logger.debug(f"{symbol}: cooldown active — skipping")
+        return False
+
     side = _determine_side(pair.predicted_change_pct)
 
     # Per-symbol regime detection using pair's own indicators
