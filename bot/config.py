@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     trading_mode: str = "DYNAMIC"
     trading_pairs: str = "AUTO"
-    analysis_timeframe: str = "15m"
+    analysis_timeframe: str = "1h"
     futures_leverage: int = 3
     starting_capital_usdt: float = 100.0
 
