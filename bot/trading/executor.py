@@ -181,16 +181,6 @@ def _determine_side(predicted_change_pct: float) -> str:
     return "SELL"
 
 
-async def _get_market_sentiment(redis: aioredis.Redis) -> tuple[str, float]:
-    """Return (sentiment, advance_ratio) from Redis. Defaults to NEUTRAL/0.5 if unavailable."""
-    raw = await redis.get("market:sentiment")
-    if raw:
-        try:
-            data = json.loads(raw)
-            return data.get("sentiment", "NEUTRAL"), float(data.get("advance_ratio", 0.5))
-        except Exception:
-            pass
-    return "NEUTRAL", 0.5
 
 
 async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, params: dict, use_testnet: bool | None = None, capital: float = 0.0) -> None:
@@ -269,12 +259,14 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 if isinstance(opened_at, datetime) and opened_at.tzinfo is None:
                     opened_at = opened_at.replace(tzinfo=timezone.utc)
                 minutes_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
-                if minutes_open >= params["negative_trade_timeout_minutes"] and pnl_usdt < 0:
+                min_daily = params.get("min_daily_trades", 0)
+                hold_limit = (24 * 60 / min_daily) if min_daily > 0 else params["negative_trade_timeout_minutes"]
+                if minutes_open >= hold_limit and pnl_usdt < 0:
                     close_reason = "negative_timeout"
-                    logger.info(f"{symbol}: closing after {minutes_open:.0f}min in loss (${pnl_usdt:.4f})")
-                elif minutes_open >= 30 and pnl_usdt > 0 and effective_pnl_pct < 1.0:
+                    logger.info(f"{symbol}: closing after {minutes_open:.0f}min in loss (${pnl_usdt:.4f}) [hold_limit={hold_limit:.1f}min]")
+                elif minutes_open >= hold_limit * 2 and pnl_usdt > 0 and effective_pnl_pct < 1.0:
                     close_reason = "profitable_timeout"
-                    logger.info(f"{symbol}: closing stagnant small profit after {minutes_open:.0f}min ({effective_pnl_pct:+.2f}%)")
+                    logger.info(f"{symbol}: closing stagnant small profit after {minutes_open:.0f}min ({effective_pnl_pct:+.2f}%) [hold_limit×2={hold_limit*2:.1f}min]")
 
         if close_reason:
             close_ok = True
@@ -419,9 +411,6 @@ async def _try_open_trade(
             else:
                 logger.debug(f"{symbol}: funding signal {funding_signal} opposes predicted {side}")
 
-    # Read market sentiment once — used for both mode selection and direction filter
-    market_sentiment, advance_ratio = await _get_market_sentiment(redis)
-
     # Gate FUTURES mode if funding is unfavorable and confidence is low
     if params["mode"] != "SPOT":
         funding_rate = funding_rates.get(symbol, {}).get("funding_rate", 0.0) if funding_rates else 0.0
@@ -437,8 +426,6 @@ async def _try_open_trade(
             )
     else:
         mode = "SPOT"
-
-    logger.debug(f"{symbol}: market sentiment={market_sentiment} ({advance_ratio:.0%} advancing) side={side}")
 
     mode_flags = await _get_trading_mode_flags(redis)
     paper = mode_flags["paper"]
@@ -476,8 +463,7 @@ async def _try_open_trade(
     )
 
     lev = params["futures_leverage"]
-    trade_divisor = params.get("min_daily_trades") or params["max_concurrent_trades"]
-    risk_pct = 100.0 / trade_divisor if trade_divisor > 0 else settings.max_risk_per_trade_percent
+    risk_pct = params.get("max_risk_per_trade_percent", settings.max_risk_per_trade_percent)
 
     # Apply regime-based position size multiplier
     regime_mult = 1.0
