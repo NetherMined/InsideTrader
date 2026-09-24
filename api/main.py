@@ -1315,14 +1315,13 @@ async def set_currency_pref(body: dict):
 
 @app.post("/api/v1/admin/hard-reset")
 async def hard_reset(session: Annotated[AsyncSession, Depends(get_session)]):
-    """Delete all trade history, reset paper capital, clear daily stats. Does NOT clear ML models."""
+    """Close open positions and reset paper capital/daily stats. Preserves trade history and ML data."""
     redis = await get_redis()
     try:
         await redis.set("bot:command", "stop")
         raw_start = await redis.get("paper:starting_capital_usdt")
         restore_capital = float(raw_start) if raw_start else _starting_capital
         await session.execute(text("DELETE FROM positions"))
-        await session.execute(text("DELETE FROM trades"))
         await session.commit()
         reset_keys = {
             "bot:daily_pnl": "0.0",

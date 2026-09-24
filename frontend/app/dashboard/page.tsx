@@ -559,7 +559,7 @@ export default function DashboardPage() {
                 <th className="text-left pb-2 font-medium">Method</th>
                 <th className="text-right pb-2 font-medium">Entry</th>
                 <th className="text-right pb-2 font-medium">Current</th>
-                <th className="text-right pb-2 font-medium">Qty</th>
+                <th className="text-right pb-2 font-medium">Invested</th>
                 <th className="text-right pb-2 font-medium">P&L</th>
                 <th className="text-right pb-2 font-medium">Next Action</th>
               </tr>
@@ -581,7 +581,9 @@ export default function DashboardPage() {
                   </td>
                   <td className="py-1.5 text-right">{fmtPrice(p.entry_price)}</td>
                   <td className="py-1.5 text-right">{fmtPrice(p.current_price)}</td>
-                  <td className="py-1.5 text-right">{fmt(p.quantity, 4)}</td>
+                  <td className="py-1.5 text-right" style={{ color: '#848e9c' }}>
+                    {display(p.quantity * p.entry_price / (p.leverage || 1))}
+                  </td>
                   <td
                     className="py-1.5 text-right font-semibold"
                     style={{ color: p.unrealized_pnl >= 0 ? '#0ecb81' : '#f6465d' }}
