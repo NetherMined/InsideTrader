@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     trading_mode: str = "DYNAMIC"
     trading_pairs: str = "AUTO"
     analysis_timeframe: str = "1h"
-    futures_leverage: int = 2
+    futures_leverage: int = 3
     starting_capital_usdt: float = 100.0
 
     futures_confidence_threshold: float = 0.75
@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     min_concurrent_trades: int = 0
     confidence_threshold: float = 0.75
     max_risk_per_trade_percent: float = 30.0
-    stop_loss_percent: float = 2.0
+    stop_loss_percent: float = 1.5
     take_profit_percent: float = 3.0
     take_profit_usdt: float = 0.0
     daily_loss_limit_percent: float = 10.0
