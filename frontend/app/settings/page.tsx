@@ -821,7 +821,7 @@ export default function SettingsPage() {
           <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'rgba(246,70,93,0.1)', color: '#f6465d' }}>Destructive</span>
         </div>
         <p className="text-xs mb-3" style={{ color: '#848e9c' }}>
-          Wipe all trade history, wins, losses and P&amp;L — restores paper capital to starting amount. Bot is stopped, ML learning data is preserved.
+          Closes all open positions and resets paper capital, daily P&amp;L, and bot state. Trade history and ML learning data are preserved.
         </p>
         {hardResetMsg && (
           <div className="text-xs mb-3 px-3 py-2 rounded" style={{ background: 'rgba(14,203,129,0.08)', color: '#0ecb81', border: '1px solid rgba(14,203,129,0.2)' }}>
@@ -833,7 +833,7 @@ export default function SettingsPage() {
           className="px-4 py-2 rounded-lg text-xs font-semibold"
           style={{ background: 'rgba(246,70,93,0.12)', color: '#f6465d', border: '1px solid rgba(246,70,93,0.3)' }}
         >
-          Reset All Trade Data
+          Reset Bot State
         </button>
       </div>
 
@@ -889,7 +889,7 @@ export default function SettingsPage() {
           >
             <div className="text-sm font-semibold mb-2" style={{ color: '#f6465d' }}>Are you sure?</div>
             <p className="text-xs mb-4" style={{ color: '#848e9c' }}>
-              This will permanently delete all trade history, P&L, wins and losses, and reset your paper capital. This cannot be undone. ML models are not affected.
+              This will close all open positions and reset paper capital, daily P&L, and bot state. Trade history and ML data are kept intact. This cannot be undone.
             </p>
             <div className="flex items-center gap-3 justify-end">
               <button
@@ -905,7 +905,7 @@ export default function SettingsPage() {
                 className="px-3 py-2 rounded-lg text-xs font-medium disabled:opacity-50"
                 style={{ background: 'rgba(246,70,93,0.2)', color: '#f6465d', border: '1px solid rgba(246,70,93,0.4)' }}
               >
-                {hardResetting ? 'Resetting...' : 'Yes, Reset Everything'}
+                {hardResetting ? 'Resetting...' : 'Yes, Reset Bot State'}
               </button>
             </div>
           </div>
