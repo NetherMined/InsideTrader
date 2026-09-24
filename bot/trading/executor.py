@@ -264,9 +264,9 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 if minutes_open >= params["negative_trade_timeout_minutes"] and pnl_usdt < 0:
                     close_reason = "negative_timeout"
                     logger.info(f"{symbol}: closing after {minutes_open:.0f}min in loss (${pnl_usdt:.4f})")
-                elif minutes_open >= 15 and pnl_usdt > 0:
+                elif minutes_open >= 30 and pnl_usdt > 0 and abs(effective_pnl_pct) < 2.0:
                     close_reason = "profitable_timeout"
-                    logger.info(f"{symbol}: closing stagnant profit after {minutes_open:.0f}min (${pnl_usdt:.4f})")
+                    logger.info(f"{symbol}: closing stagnant small profit after {minutes_open:.0f}min ({effective_pnl_pct:+.2f}%)")
 
         if close_reason:
             close_ok = True
