@@ -230,7 +230,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         recovery_key = "bot:recovery_mode"
         in_recovery_raw = await redis.sismember(recovery_key, str(pos_id))
         be_eligible = (side == "BUY" and take_profit > entry_price) or (side == "SELL" and take_profit < entry_price)
-        if not in_recovery_raw and effective_pnl_pct <= -2.0 and be_eligible:
+        if not in_recovery_raw and effective_pnl_pct <= -1.5 and be_eligible:
             new_tp = entry_price
             await update_position_tp(pos_id, new_tp)
             await redis.sadd(recovery_key, str(pos_id))
@@ -243,19 +243,25 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             close_reason = "manual"
         else:
             close_reason = None
-            if side == "BUY":
-                sl_hit = current_price <= stop_loss
-                tp_hit = current_price >= take_profit
-            else:
-                sl_hit = current_price >= stop_loss
-                tp_hit = current_price <= take_profit
 
-            if sl_hit:
+            # Hard cap: effective loss exceeds 2% — exit before price-level SL
+            if effective_pnl_pct <= -2.0:
                 close_reason = "stop_loss"
-                current_price = stop_loss  # simulate fill at SL price, not gapped market price
-            elif tp_hit:
-                close_reason = "take_profit"
-                current_price = take_profit  # simulate fill at TP price
+                logger.info(f"{symbol}: hard 2% effective loss cap triggered ({effective_pnl_pct:.2f}%)")
+            else:
+                if side == "BUY":
+                    sl_hit = current_price <= stop_loss
+                    tp_hit = current_price >= take_profit
+                else:
+                    sl_hit = current_price >= stop_loss
+                    tp_hit = current_price <= take_profit
+
+                if sl_hit:
+                    close_reason = "stop_loss"
+                    current_price = stop_loss  # simulate fill at SL price, not gapped market price
+                elif tp_hit:
+                    close_reason = "take_profit"
+                    current_price = take_profit  # simulate fill at TP price
 
         if close_reason is None:
             opened_at = pos.get("opened_at")
@@ -266,7 +272,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 if minutes_open >= params["negative_trade_timeout_minutes"] and pnl_usdt < 0:
                     close_reason = "negative_timeout"
                     logger.info(f"{symbol}: closing after {minutes_open:.0f}min in loss (${pnl_usdt:.4f})")
-                elif minutes_open >= 30 and pnl_usdt > 0 and abs(effective_pnl_pct) < 2.0:
+                elif minutes_open >= 30 and pnl_usdt > 0 and effective_pnl_pct < 1.0:
                     close_reason = "profitable_timeout"
                     logger.info(f"{symbol}: closing stagnant small profit after {minutes_open:.0f}min ({effective_pnl_pct:+.2f}%)")
 

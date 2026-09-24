@@ -109,7 +109,7 @@ export default function HistoryPage() {
                 <th className="text-left px-4 py-2.5 font-medium">Mode</th>
                 <th className="text-right px-4 py-2.5 font-medium">Entry</th>
                 <th className="text-right px-4 py-2.5 font-medium">Exit</th>
-                <th className="text-right px-4 py-2.5 font-medium">Qty</th>
+                <th className="text-right px-4 py-2.5 font-medium">Invested</th>
                 <th className="text-right px-4 py-2.5 font-medium">P&L $</th>
                 <th className="text-right px-4 py-2.5 font-medium">P&L %</th>
                 <th className="text-left px-4 py-2.5 font-medium">Status</th>
@@ -137,7 +137,9 @@ export default function HistoryPage() {
                   </td>
                   <td className="px-4 py-2 text-right">{fmtPrice(t.entry_price)}</td>
                   <td className="px-4 py-2 text-right">{t.exit_price ? fmtPrice(t.exit_price) : '—'}</td>
-                  <td className="px-4 py-2 text-right">{fmt(t.quantity, 4)}</td>
+                  <td className="px-4 py-2 text-right" style={{ color: '#848e9c' }}>
+                    {display(t.quantity * t.entry_price / (t.leverage || 1))}
+                  </td>
                   <td
                     className="px-4 py-2 text-right font-semibold"
                     style={{ color: t.pnl_usdt == null ? '#848e9c' : t.pnl_usdt >= 0 ? '#0ecb81' : '#f6465d' }}
