@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     trading_mode: str = "DYNAMIC"
     trading_pairs: str = "AUTO"
     analysis_timeframe: str = "1h"
-    futures_leverage: int = 2
+    futures_leverage: int = 3
     starting_capital_usdt: float = 100.0
 
     futures_confidence_threshold: float = 0.75
@@ -30,16 +30,16 @@ class Settings(BaseSettings):
     daily_target_percent: float = 2.0
     max_concurrent_trades: int = 3
     max_daily_trades: int = 200
-    min_daily_trades: int = 100
+    min_daily_trades: int = 50
     min_concurrent_trades: int = 0
     confidence_threshold: float = 0.75
     max_risk_per_trade_percent: float = 30.0
-    stop_loss_percent: float = 2.0
+    stop_loss_percent: float = 1.5
     take_profit_percent: float = 3.0
     take_profit_usdt: float = 0.0
     daily_loss_limit_percent: float = 10.0
     max_single_coin_exposure_percent: float = 30.0
-    negative_trade_timeout_minutes: int = 0
+    negative_trade_timeout_minutes: int = 15
     taker_fee_rate: float = 0.0004
 
     paper_trading_mode: bool = True

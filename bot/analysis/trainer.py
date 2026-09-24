@@ -29,7 +29,7 @@ from bot.analysis.model import PricePredictor
 from bot.analysis.mode_classifier import classify_mode, mode_reason
 from bot.analysis.ranker import rank_pairs, RankedPair
 from bot.analysis.backtest import run_backtest
-from bot.analysis.performance_tracker import get_symbol_confidence_factors
+from bot.analysis.performance_tracker import get_symbol_confidence_factors, get_direction_factors, get_regime_factors
 
 CONCURRENCY = 8
 
@@ -202,6 +202,7 @@ async def _analyse_symbol(symbol: str) -> dict | None:
         "mode": mode,
         "rsi": float(latest.get("rsi", 50.0) or 50.0),
         "bb_pct": float(latest.get("bb_pct", 0.5) or 0.5),
+        "bb_width_pct": float(latest.get("bb_width_pct", 0.05) or 0.05),
         "current_price": current_price,
         "target_price": target_price,
     }
@@ -222,14 +223,36 @@ async def run_analysis(symbols: list[str]) -> list[RankedPair]:
                 return None
 
     perf_factors = await get_symbol_confidence_factors()
+    dir_factors = await get_direction_factors()
+    regime_factors = await get_regime_factors()
 
     results = await asyncio.gather(*[analyse_direct(s) for s in symbols])
     predictions = [r for r in results if r is not None]
 
     for pred in predictions:
-        factor = perf_factors.get(pred["symbol"], 1.0)
-        if factor != 1.0:
-            pred["confidence"] = min(1.0, pred["confidence"] * factor)
+        sym = pred["symbol"]
+        conf = pred["confidence"]
+
+        sym_factor = perf_factors.get(sym, 1.0)
+        conf *= sym_factor
+
+        side = "BUY" if pred["predicted_change_pct"] >= 0 else "SELL"
+        d_factor = dir_factors.get(sym, {}).get(side, 1.0)
+        conf *= d_factor
+
+        mode = pred.get("mode", "SPOT")
+        if mode == "FUTURES" or mode == "DYNAMIC":
+            r_factor = regime_factors.get("TRENDING", 1.0)
+        else:
+            r_factor = 1.0
+        conf *= r_factor
+
+        pred["confidence"] = min(1.0, max(0.0, conf))
+        if sym_factor != 1.0 or d_factor != 1.0 or r_factor != 1.0:
+            logger.debug(
+                f"{sym} {side}: conf adjusted {pred['confidence']:.3f} "
+                f"(sym={sym_factor} dir={d_factor} regime={r_factor})"
+            )
 
     ranked = rank_pairs(predictions)
     logger.info(f"Analysis complete: {len(predictions)}/{len(symbols)} pairs analysed, {len(ranked)} ranked")

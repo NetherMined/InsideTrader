@@ -21,8 +21,12 @@ async def open_position(
     estimated_fee_usdt: float = 0.0,
     funding_rate: float = 0.0,
     regime: str = "UNKNOWN",
+    entry_indicators: dict | None = None,
 ) -> int:
     """Insert a new open position. Returns the position ID."""
+    extra_data = {}
+    if entry_indicators:
+        extra_data["entry_indicators"] = entry_indicators
     async with async_session() as session:
         async with session.begin():
             trade_result = await session.execute(
@@ -31,12 +35,12 @@ async def open_position(
                         (symbol, side, mode, entry_price, quantity, leverage,
                          stop_loss_price, take_profit_price, status,
                          binance_order_id, paper_trade, estimated_fee_usdt,
-                         funding_rate, regime)
+                         funding_rate, regime, extra)
                     VALUES
                         (:symbol, :side, :mode, :entry_price, :quantity, :leverage,
                          :stop_loss_price, :take_profit_price, 'OPEN',
                          :order_id, :paper_trade, :estimated_fee,
-                         :funding_rate, :regime)
+                         :funding_rate, :regime, CAST(:extra AS jsonb))
                     RETURNING id
                 """),
                 {
@@ -48,6 +52,7 @@ async def open_position(
                     "estimated_fee": estimated_fee_usdt,
                     "funding_rate": funding_rate,
                     "regime": regime,
+                    "extra": json.dumps(extra_data) if extra_data else None,
                 },
             )
             trade_id = trade_result.scalar()

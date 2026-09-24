@@ -37,15 +37,15 @@ def _futures_exchange(use_testnet: bool | None = None) -> ccxt.binance:
     return ex
 
 
-async def get_account_balance(use_testnet: bool | None = None) -> float:
-    """Return total USDT balance from Binance account."""
+async def get_account_balance(use_testnet: bool | None = None) -> float | None:
+    """Return total USDT balance from Binance account, or None on failure."""
     exchange = _spot_exchange(use_testnet)
     try:
         balance = await exchange.fetch_balance()
         return float(balance.get("USDT", {}).get("free", 0.0))
     except Exception as e:
         logger.error(f"Failed to fetch balance: {e}")
-        return settings.starting_capital_usdt
+        return None
     finally:
         await exchange.close()
 

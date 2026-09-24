@@ -391,8 +391,10 @@ export default function DashboardPage() {
   const [showStartupModal, setShowStartupModal] = useState(false);
 
   const freeCapital = status?.capital_usdt ?? 0;
+  const futuresBalance = status?.futures_usdt ?? 0;
   const totalPortfolio =
     freeCapital +
+    futuresBalance +
     positions.reduce(
       (sum, p) => sum + (p.entry_price * p.quantity) / p.leverage + p.unrealized_pnl,
       0
@@ -425,9 +427,9 @@ export default function DashboardPage() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         <PnlSplitCard />
         <StatCard
-          label="Portfolio Value"
+          label="Portfolio"
           value={display(totalPortfolio, 2)}
-          sub={`${display(freeCapital, 2)} free · ${clock}`}
+          sub={`Spot: ${display(freeCapital, 2)}${futuresBalance > 0 ? ` · Futures: ${display(futuresBalance, 2)}` : ''} · Started: ${display(status?.started_with_usdt ?? 0, 2)}`}
         />
         <StatCard
           label="Open Trades"
