@@ -16,13 +16,18 @@ export function BotControls({ status, onUpdate, onRequestStartup }: Props) {
   const [allChecksPass, setAllChecksPass] = useState(false);
 
   useEffect(() => {
-    if (status?.state === 'awaiting_confirmation') {
+    if (status?.state !== 'awaiting_confirmation') {
+      setAllChecksPass(false);
+      return;
+    }
+    const check = () => {
       api.startupStatus().then((s) => {
         setAllChecksPass(s.data_feed_active && s.capital_usdt > 0);
       }).catch(() => setAllChecksPass(false));
-    } else {
-      setAllChecksPass(false);
-    }
+    };
+    check();
+    const id = setInterval(check, 3000);
+    return () => clearInterval(id);
   }, [status?.state]);
 
   const send = async (cmd: 'stop' | 'pause' | 'resume') => {
