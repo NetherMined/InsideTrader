@@ -52,6 +52,11 @@ _FUNDING_CACHE_TTL = 300  # 5 minutes
 _CORR_CACHE_KEY = "bot:correlation_matrix"
 _CORR_CACHE_TTL = 3600  # 1 hour
 _SYMBOL_COOLDOWN_SECONDS = 300  # 5 min cooldown after closing a symbol before reopening
+_TRAIL_ACTIVATION_PCT = 1.0    # start trailing at 1% effective profit
+_TRAIL_REVERSAL_PCT = 0.5      # close if price reverses 0.5% effective from peak
+_RATE_WINDOW_KEY = "bot:trade_rate_window"
+_RATE_WINDOW_SECONDS = 1200    # 20-minute rolling window
+_RATE_WINDOW_MAX_TRADES = 3    # max trades per window
 
 
 async def _fetch_funding_rates_cached(redis: aioredis.Redis, symbols: list[str]) -> dict[str, dict]:
@@ -244,11 +249,44 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         else:
             close_reason = None
 
+            # Trailing stop: track best (peak) price and close on reversal when profitable
+            trail_key = f"bot:trail:{pos_id}"
+            if effective_pnl_pct >= _TRAIL_ACTIVATION_PCT:
+                trail_raw = await redis.get(trail_key)
+                trail_best = float(trail_raw) if trail_raw else None
+                if side == "BUY":
+                    new_best = max(current_price, trail_best or current_price)
+                else:
+                    new_best = min(current_price, trail_best or current_price)
+                if trail_best is None or new_best != trail_best:
+                    await redis.setex(trail_key, 3600, str(new_best))
+                trail_raw_pct = _TRAIL_REVERSAL_PCT / max(leverage, 1)
+                if side == "BUY":
+                    trail_trigger = new_best * (1 - trail_raw_pct / 100)
+                    if current_price < trail_trigger:
+                        close_reason = "trailing_stop"
+                        logger.info(
+                            f"{symbol}: trailing stop triggered (peak=${new_best:.4f} "
+                            f"trigger=${trail_trigger:.4f} effective={effective_pnl_pct:+.2f}%)"
+                        )
+                else:
+                    trail_trigger = new_best * (1 + trail_raw_pct / 100)
+                    if current_price > trail_trigger:
+                        close_reason = "trailing_stop"
+                        logger.info(
+                            f"{symbol}: trailing stop triggered (peak=${new_best:.4f} "
+                            f"trigger=${trail_trigger:.4f} effective={effective_pnl_pct:+.2f}%)"
+                        )
+            elif effective_pnl_pct < 0:
+                trail_raw = await redis.get(trail_key)
+                if trail_raw:
+                    await redis.delete(trail_key)
+
             # Hard cap: effective loss exceeds 2% — exit before price-level SL
-            if effective_pnl_pct <= -2.0:
+            if close_reason is None and effective_pnl_pct <= -2.0:
                 close_reason = "stop_loss"
                 logger.info(f"{symbol}: hard 2% effective loss cap triggered ({effective_pnl_pct:.2f}%)")
-            else:
+            elif close_reason is None:
                 if side == "BUY":
                     sl_hit = current_price <= stop_loss
                     tp_hit = current_price >= take_profit
@@ -259,6 +297,10 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 if sl_hit:
                     close_reason = "stop_loss"
                     current_price = stop_loss  # simulate fill at SL price, not gapped market price
+                    if paper:
+                        # Simulate SL slippage — futures slip more in fast moves
+                        slip = 0.001 if mode == "FUTURES" else 0.0005
+                        current_price = current_price * (1 - slip) if side == "BUY" else current_price * (1 + slip)
                 elif tp_hit:
                     close_reason = "take_profit"
                     current_price = take_profit  # simulate fill at TP price
@@ -306,6 +348,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             await redis.setex(f"bot:cooldown:{symbol}", _SYMBOL_COOLDOWN_SECONDS, "1")
 
             await redis.srem(recovery_key, str(pos_id))
+            await redis.delete(f"bot:trail:{pos_id}")
 
             # Estimate and record fee for this trade
             estimated_fee = abs(notional * settings.taker_fee_rate)  # Binance taker fee ~0.04%
@@ -350,6 +393,13 @@ async def _try_open_trade(
     cooldown_active = await redis.get(f"bot:cooldown:{symbol}")
     if cooldown_active:
         logger.debug(f"{symbol}: cooldown active — skipping")
+        return False
+
+    # Rate limit: max 3 new trades in any 20-minute window
+    _now_ts = datetime.now(timezone.utc).timestamp()
+    recent_count = await redis.zcount(_RATE_WINDOW_KEY, _now_ts - _RATE_WINDOW_SECONDS, "+inf")
+    if recent_count >= _RATE_WINDOW_MAX_TRADES:
+        logger.debug(f"{symbol}: rate limit — {recent_count} trades opened in last 20min")
         return False
 
     side = _determine_side(pair.predicted_change_pct)
@@ -593,6 +643,11 @@ async def _try_open_trade(
     )
     await risk.on_trade_opened()
     await ev.publish_trade_opened(redis, symbol, side, mode, fill_price, quantity, paper)
+
+    # Record in rate window
+    _ts = datetime.now(timezone.utc).timestamp()
+    await redis.zadd(_RATE_WINDOW_KEY, {f"{symbol}:{int(_ts)}": _ts})
+    await redis.zremrangebyscore(_RATE_WINDOW_KEY, 0, _ts - _RATE_WINDOW_SECONDS)
     return True
 
 

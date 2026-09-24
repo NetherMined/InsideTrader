@@ -97,8 +97,10 @@ async def _analyse_symbol(symbol: str) -> dict | None:
         logger.debug(f"{symbol}: not enough candles ({len(df_raw)}), skipping")
         return None
 
+    _timeframe_target = {"5m": 0.1, "15m": 0.25, "30m": 0.5, "1h": 1.0, "4h": 4.0}
+    _target_pct = _timeframe_target.get(settings.analysis_timeframe, settings.daily_target_percent / 2)
     df, feat_df, X, y_reg, y_cls = await asyncio.to_thread(
-        _prepare_features, df_raw, settings.daily_target_percent / 2
+        _prepare_features, df_raw, _target_pct
     )
     if len(X) < 100:
         logger.debug(f"{symbol}: not enough clean rows ({len(X)}), skipping")
@@ -286,7 +288,7 @@ async def force_retrain_models(symbols: list[str]) -> None:
                         WHERE symbol = :symbol AND timeframe = :timeframe
                         ORDER BY open_time ASC
                     """),
-                    {"symbol": symbol, "timeframe": "1h"},
+                    {"symbol": symbol, "timeframe": settings.analysis_timeframe},
                 )
                 rows = result.mappings().all()
 
@@ -299,7 +301,8 @@ async def force_retrain_models(symbols: list[str]) -> None:
                 df_raw[col] = df_raw[col].astype(float)
 
             df = add_indicators(df_raw)
-            feat_df = engineer_features(df, target_pct=0.01)
+            _tf_target = {"5m": 0.1, "15m": 0.25, "30m": 0.5, "1h": 1.0, "4h": 4.0}
+            feat_df = engineer_features(df, target_pct=_tf_target.get(settings.analysis_timeframe, 1.0))
 
             X, y_reg, y_cls = get_X_y(feat_df)
             if len(X) < 300:

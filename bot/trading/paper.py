@@ -47,10 +47,12 @@ async def simulate_buy(
     capital = await get_paper_capital(redis)
     margin = notional / leverage if mode == "FUTURES" else notional
 
-    if margin > capital:
-        return {"ok": False, "error": f"Insufficient paper capital (${capital:.2f} < ${margin:.2f})"}
+    open_fee = notional * settings.taker_fee_rate
+    total_cost = margin + open_fee
+    if total_cost > capital:
+        return {"ok": False, "error": f"Insufficient paper capital (${capital:.2f} < ${total_cost:.2f})"}
 
-    await update_paper_capital(redis, -margin)
+    await update_paper_capital(redis, -total_cost)
 
     result = {
         "ok": True,
@@ -64,7 +66,7 @@ async def simulate_buy(
     logger.info(
         f"[PAPER] {'FUTURES LONG' if mode == 'FUTURES' else 'SPOT BUY'} "
         f"{symbol}: qty={quantity:.6f} @ ${price:.4f} = ${notional:.2f} | "
-        f"margin locked: ${margin:.2f} | capital remaining: ${capital - margin:.2f}"
+        f"margin locked: ${margin:.2f} fee: ${open_fee:.4f} | capital remaining: ${capital - total_cost:.2f}"
     )
     return result
 
@@ -83,6 +85,8 @@ async def simulate_sell(
     notional = quantity * entry_price
     pnl_usdt = notional * effective_pnl_pct / 100
     margin = notional / leverage if mode == "FUTURES" else notional
+    close_fee = abs(quantity * exit_price * settings.taker_fee_rate)
+    pnl_usdt -= close_fee
 
     await update_paper_capital(redis, margin + pnl_usdt)
 
@@ -98,7 +102,7 @@ async def simulate_sell(
     emoji = "✅" if pnl_usdt >= 0 else "❌"
     logger.info(
         f"[PAPER] CLOSE {symbol}: {emoji} P&L ${pnl_usdt:+.4f} ({effective_pnl_pct:+.2f}%) "
-        f"entry=${entry_price:.4f} exit=${exit_price:.4f} margin={margin:.2f}"
+        f"entry=${entry_price:.4f} exit=${exit_price:.4f} margin={margin:.2f} fee=${close_fee:.4f}"
     )
     return result
 
@@ -115,10 +119,12 @@ async def simulate_sell_short(
     margin = notional / leverage if mode == "FUTURES" else notional
     capital = await get_paper_capital(redis)
 
-    if margin > capital:
-        return {"ok": False, "error": f"Insufficient paper capital (${capital:.2f} < ${margin:.2f})"}
+    open_fee = notional * settings.taker_fee_rate
+    total_cost = margin + open_fee
+    if total_cost > capital:
+        return {"ok": False, "error": f"Insufficient paper capital (${capital:.2f} < ${total_cost:.2f})"}
 
-    await update_paper_capital(redis, -margin)
+    await update_paper_capital(redis, -total_cost)
 
     result = {
         "ok": True,
@@ -151,6 +157,8 @@ async def simulate_buy_back(
     notional = quantity * entry_price
     pnl_usdt = notional * effective_pnl_pct / 100
     margin = notional / leverage if mode == "FUTURES" else notional
+    close_fee = abs(quantity * exit_price * settings.taker_fee_rate)
+    pnl_usdt -= close_fee
 
     await update_paper_capital(redis, margin + pnl_usdt)
 
@@ -166,6 +174,6 @@ async def simulate_buy_back(
     emoji = "✅" if pnl_usdt >= 0 else "❌"
     logger.info(
         f"[PAPER] CLOSE SHORT {symbol}: {emoji} P&L ${pnl_usdt:+.4f} ({effective_pnl_pct:+.2f}%) "
-        f"entry=${entry_price:.4f} exit=${exit_price:.4f}"
+        f"entry=${entry_price:.4f} exit=${exit_price:.4f} fee=${close_fee:.4f}"
     )
     return result
