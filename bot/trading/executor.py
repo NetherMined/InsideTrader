@@ -51,7 +51,7 @@ _FUNDING_CACHE_KEY = "bot:funding_rates_cache"
 _FUNDING_CACHE_TTL = 300  # 5 minutes
 _CORR_CACHE_KEY = "bot:correlation_matrix"
 _CORR_CACHE_TTL = 3600  # 1 hour
-_SYMBOL_COOLDOWN_SECONDS = 900  # 15 min cooldown after closing a symbol before reopening
+_SYMBOL_COOLDOWN_SECONDS = 300  # 5 min cooldown after closing a symbol before reopening
 
 
 async def _fetch_funding_rates_cached(redis: aioredis.Redis, symbols: list[str]) -> dict[str, dict]:
@@ -252,8 +252,10 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
 
             if sl_hit:
                 close_reason = "stop_loss"
+                current_price = stop_loss  # simulate fill at SL price, not gapped market price
             elif tp_hit:
                 close_reason = "take_profit"
+                current_price = take_profit  # simulate fill at TP price
 
         if close_reason is None:
             opened_at = pos.get("opened_at")
