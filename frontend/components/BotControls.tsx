@@ -22,7 +22,7 @@ export function BotControls({ status, onUpdate, onRequestStartup }: Props) {
     }
     const check = () => {
       api.startupStatus().then((s) => {
-        setAllChecksPass(s.data_feed_active && s.capital_usdt > 0);
+        setAllChecksPass(s.capital_usdt > 0);
       }).catch(() => setAllChecksPass(false));
     };
     check();
@@ -110,7 +110,7 @@ export function BotControls({ status, onUpdate, onRequestStartup }: Props) {
       {(!running && !killSwitch) && (
         <button
           onClick={handleStart}
-          disabled={loading || (awaiting && !allChecksPass)}
+          disabled={loading || (awaiting && !allChecksPass) || state === 'unknown'}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-opacity disabled:opacity-50"
           style={{ background: 'rgba(14,203,129,0.15)', color: '#0ecb81' }}
         >
@@ -118,7 +118,7 @@ export function BotControls({ status, onUpdate, onRequestStartup }: Props) {
             <CheckCircle size={13} style={{ color: '#0ecb81' }} />
           )}
           <Play size={13} />
-          {awaiting ? 'Start Trading' : stopped ? 'Start' : 'Resume'}
+          {state === 'unknown' ? 'Initializing...' : awaiting ? 'Start Trading' : stopped ? 'Start' : 'Resume'}
         </button>
       )}
 
