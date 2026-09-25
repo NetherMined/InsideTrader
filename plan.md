@@ -149,7 +149,7 @@ Run Experiments branch in paper mode and collect these metrics daily:
 
 ---
 
-## Phase 6 — Regime Gating Experiment (highest-impact test)
+## Phase 6 — Regime Gating Experiment ⏳ RUNNING (started Sep 25, 2026 ~16:35 UTC+2)
 
 **What:** Block ALL trades when `regime == RANGING` (currently only reduces position size).
 
@@ -160,6 +160,12 @@ Run Experiments branch in paper mode and collect these metrics daily:
 
 **Pass:** 30–50% of attempted trades filtered. Net P&L improves despite fewer trades.
 **Fail:** <10% filtered — ADX threshold needs adjustment in `regime_detector.py`.
+
+**Observations (Sep 25):**
+- Gate deployed and confirmed integrated at line ~486 of `executor.py`
+- Market conditions: most pairs TRENDING (ADX>25) or TRANSITION, few RANGING (ADX<20 + BB_WIDTH<0.03)
+- Low-ADX pairs (ETH ADX=11.7, BCH ADX=11.6) classify as TRANSITION not RANGING because bb_width > 0.03
+- No RANGING gates fired in first hour — check again at 48h mark via: `docker logs insidetrader-bot-1 2>&1 | grep 'RANGING regime gate'`
 
 ---
 
@@ -177,6 +183,6 @@ Before merging Experiments → main and enabling live trading:
 - [x] T3-06 P&L fallback capital fixed
 - [x] Phase 4 config unified across all files
 - [ ] 2+ weeks paper trading: positive net P&L after fees
-- [ ] Regime gating experiment completed and result logged
+- [ ] Regime gating experiment completed and result logged (48h window: started Sep 25 ~16:35)
 - [ ] Emergency stop tested end-to-end
 - [ ] Docker images rebuilt with all fixes
