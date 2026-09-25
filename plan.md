@@ -82,9 +82,9 @@ The Experiments branch contains the following changes from Features:
 
 ---
 
-## Phase 3 — Safety Critical Bugs to Fix (from audit)
+## Phase 3 — Safety Critical Bugs ✓ ALREADY FIXED
 
-These are the P1 items identified in the full audit. Confirm repro in Experiments, then fix.
+All 6 items were confirmed fixed in the codebase during audit on Sep 25, 2026.
 
 ### T3-01: Kill Switch Bypass
 **Repro:** Activate kill switch while defensive mode is also active.
@@ -122,14 +122,14 @@ These are the P1 items identified in the full audit. Confirm repro in Experiment
 
 Verify these are consistent before any live trading:
 
-| Setting | bot/config.py | api/config.py | .env | Target |
-|---------|--------------|---------------|------|--------|
-| max_concurrent_trades | ? | ? | ? | 3–5 |
-| confidence_threshold | ? | ? | ? | 0.75 |
-| futures_leverage | ? | ? | ? | 2 |
-| stop_loss_percent | ? | ? | ? | 2.0 |
-| analysis_timeframe | ? | ? | ? | 1h |
-| min_daily_trades | ? | ? | ? | 20–30 |
+| Setting | bot/config.py | api/config.py | .env | Target | Status |
+|---------|--------------|---------------|------|--------|--------|
+| max_concurrent_trades | 5 | 5 | 5 | 3–5 | FIXED |
+| confidence_threshold | 0.75 | 0.75 | 0.75 | 0.75 | FIXED |
+| futures_leverage | 2 | 2 | 2 | 2 | FIXED |
+| stop_loss_percent | 2.0 | 2.0 | 2.0 | 2.0 | FIXED |
+| analysis_timeframe | 1h | N/A | 1h | 1h | FIXED |
+| min_daily_trades | 30 | N/A | 30 | 20–30 | FIXED |
 
 ---
 
@@ -169,13 +169,13 @@ Before merging Experiments → main and enabling live trading:
 
 - [ ] T1-01 through T1-05 all pass
 - [ ] T2-01 through T2-06 all pass
-- [ ] T3-01 kill switch bypass fixed
-- [ ] T3-02 daily loss USDT tracking fixed
-- [ ] T3-03 fill price validation fixed
-- [ ] T3-04 goal progress uses period P&L
-- [ ] T3-05 MIN_NOTIONAL raised to 10.0
-- [ ] T3-06 P&L fallback capital fixed
-- [ ] Phase 4 config unified across all files
+- [x] T3-01 kill switch bypass fixed
+- [x] T3-02 daily loss USDT tracking fixed
+- [x] T3-03 fill price validation fixed
+- [x] T3-04 goal progress uses period P&L
+- [x] T3-05 MIN_NOTIONAL raised to 10.0
+- [x] T3-06 P&L fallback capital fixed
+- [x] Phase 4 config unified across all files
 - [ ] 2+ weeks paper trading: positive net P&L after fees
 - [ ] Regime gating experiment completed and result logged
 - [ ] Emergency stop tested end-to-end
