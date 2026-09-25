@@ -483,6 +483,11 @@ async def _try_open_trade(
         except Exception as e:
             logger.debug(f"{symbol}: regime detection failed ({e})")
 
+    # Regime gate: block all trades in RANGING regime (experiment — see plan.md Phase 6)
+    if regime_result is not None and regime_result.regime == "RANGING":
+        logger.info(f"{symbol}: RANGING regime gate — trade blocked (adx={regime_result.adx:.1f})")
+        return False
+
     # Phase 2: Mean-reversion signal override when in RANGING regime
     if regime_result is not None and regime_result.strategy == "mean_reversion":
         from bot.analysis.regime_detector import generate_mean_reversion_signal
