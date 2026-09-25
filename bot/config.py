@@ -19,22 +19,22 @@ class Settings(BaseSettings):
 
     trading_mode: str = "DYNAMIC"
     trading_pairs: str = "AUTO"
-    analysis_timeframe: str = "15m"
-    futures_leverage: int = 5
+    analysis_timeframe: str = "1h"
+    futures_leverage: int = 2
     starting_capital_usdt: float = 100.0
 
-    futures_confidence_threshold: float = 0.55
+    futures_confidence_threshold: float = 0.75
     volatility_futures_cap_percent: float = 5.0
     adx_futures_threshold: float = 25.0
 
     daily_target_percent: float = 2.0
-    max_concurrent_trades: int = 20
+    max_concurrent_trades: int = 5
     max_daily_trades: int = 200
-    min_daily_trades: int = 50
+    min_daily_trades: int = 30
     min_concurrent_trades: int = 0
-    confidence_threshold: float = 0.60
+    confidence_threshold: float = 0.75
     max_risk_per_trade_percent: float = 2.0
-    stop_loss_percent: float = 1.5
+    stop_loss_percent: float = 2.0
     take_profit_percent: float = 3.0
     take_profit_usdt: float = 0.0
     daily_loss_limit_percent: float = 10.0

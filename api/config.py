@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     starting_capital_usdt: float = 100.0
 
     daily_target_percent: float = 2.0
-    max_concurrent_trades: int = 3
+    max_concurrent_trades: int = 5
     max_daily_trades: int = 200
     confidence_threshold: float = 0.75
     stop_loss_percent: float = 2.0
