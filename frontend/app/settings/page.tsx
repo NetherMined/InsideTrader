@@ -96,24 +96,31 @@ function ModeToggle({
   onChange: (v: string) => void;
   disabled?: boolean;
 }) {
+  const MODES: { key: string; label: string; desc: string }[] = [
+    { key: 'SPOT', label: 'Spot Only', desc: 'BUY only, no leverage' },
+    { key: 'DYNAMIC', label: 'Dynamic', desc: 'ML picks Spot or Futures' },
+    { key: 'FUTURES', label: 'Futures Only', desc: 'All trades use leverage' },
+  ];
   return (
-    <div className="flex items-center justify-between py-2" style={{ borderBottom: '1px solid #1a1a1a' }}>
-      <span className="text-xs" style={{ color: '#848e9c' }}>Trading Mode</span>
+    <div className="py-2" style={{ borderBottom: '1px solid #1a1a1a' }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs" style={{ color: '#848e9c' }}>Trading Mode</span>
+      </div>
       <div className="flex items-center gap-1">
-        {(['SPOT', 'DYNAMIC'] as const).map((mode) => (
+        {MODES.map(({ key, label }) => (
           <button
-            key={mode}
-            onClick={() => onChange(mode)}
+            key={key}
+            onClick={() => onChange(key)}
             disabled={disabled}
             className="px-2.5 py-1 rounded text-xs font-medium transition-all"
             style={{
-              background: value === mode ? 'rgba(240,185,11,0.15)' : '#1a1a1a',
-              color: value === mode ? '#f0b90b' : '#555',
-              border: `1px solid ${value === mode ? 'rgba(240,185,11,0.3)' : '#2a2a2a'}`,
+              background: value === key ? 'rgba(240,185,11,0.15)' : '#1a1a1a',
+              color: value === key ? '#f0b90b' : '#555',
+              border: `1px solid ${value === key ? 'rgba(240,185,11,0.3)' : '#2a2a2a'}`,
               cursor: disabled ? 'wait' : 'pointer',
             }}
           >
-            {mode === 'SPOT' ? 'Spot Only' : 'Dynamic'}
+            {label}
           </button>
         ))}
       </div>
@@ -133,6 +140,8 @@ const DEFAULT_LIMITS: TradeLimits = {
   min_daily_trades: 0,
   min_concurrent_trades: 0,
   max_daily_trades: 200,
+  force_trade_mode: 'DYNAMIC',
+  disable_futures_buy: true,
 };
 
 export default function SettingsPage() {
@@ -215,7 +224,7 @@ export default function SettingsPage() {
     setTimeout(() => setToast(null), 3000);
   }
 
-  async function handleLimitChange(field: keyof TradeLimits, value: number | string) {
+  async function handleLimitChange(field: keyof TradeLimits, value: number | string | boolean) {
     const updated = { ...limits, [field]: value };
     setLimits(updated);
     setSaving(true);
@@ -625,6 +634,24 @@ export default function SettingsPage() {
           onChange={(v) => handleLimitChange('trading_mode', v)}
           disabled={saving}
         />
+        <div className="flex items-center justify-between py-2" style={{ borderBottom: '1px solid #1a1a1a' }}>
+          <div>
+            <span className="text-xs" style={{ color: '#848e9c' }}>Futures BUY Gate</span>
+            <div className="text-xs mt-0.5" style={{ color: '#555', fontSize: 10 }}>
+              Auto-managed by ML — bot gates futures longs if win rate falls below 45%
+            </div>
+          </div>
+          <span
+            className="px-3 py-1 rounded text-xs font-semibold"
+            style={{
+              background: limits.disable_futures_buy ? 'rgba(246,70,93,0.12)' : 'rgba(14,203,129,0.1)',
+              color: limits.disable_futures_buy ? '#f6465d' : '#0ecb81',
+              border: `1px solid ${limits.disable_futures_buy ? 'rgba(246,70,93,0.3)' : 'rgba(14,203,129,0.25)'}`,
+            }}
+          >
+            {limits.disable_futures_buy ? 'Gated by ML' : 'Allowed'}
+          </span>
+        </div>
         <Stepper
           label="Max concurrent trades"
           value={limits.max_concurrent_trades}
@@ -887,10 +914,24 @@ export default function SettingsPage() {
             style={{ background: '#111111', border: '1px solid rgba(246,70,93,0.4)' }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="text-sm font-semibold mb-2" style={{ color: '#f6465d' }}>Are you sure?</div>
-            <p className="text-xs mb-4" style={{ color: '#848e9c' }}>
-              This will close all open positions and reset paper capital, daily P&L, and bot state. Trade history and ML data are kept intact. This cannot be undone.
+            <div className="text-sm font-semibold mb-2" style={{ color: '#f6465d' }}>Reset Paper Session?</div>
+            <p className="text-xs mb-2" style={{ color: '#848e9c' }}>
+              This resets your paper trading session — clears positions, P&L, and capital back to the starting value.
             </p>
+            <div className="text-xs mb-4 space-y-1">
+              <div className="flex items-center gap-2" style={{ color: '#0ecb81' }}>
+                <span>✓</span><span>Trade history archived — bot keeps learning from it</span>
+              </div>
+              <div className="flex items-center gap-2" style={{ color: '#0ecb81' }}>
+                <span>✓</span><span>ML models and candle data preserved</span>
+              </div>
+              <div className="flex items-center gap-2" style={{ color: '#f6465d' }}>
+                <span>✗</span><span>Open positions closed and removed from view</span>
+              </div>
+              <div className="flex items-center gap-2" style={{ color: '#f6465d' }}>
+                <span>✗</span><span>Paper capital, P&L, and daily stats reset to zero</span>
+              </div>
+            </div>
             <div className="flex items-center gap-3 justify-end">
               <button
                 onClick={() => setShowHardResetModal(false)}

@@ -52,6 +52,56 @@ _FUNDING_CACHE_TTL = 300  # 5 minutes
 _CORR_CACHE_KEY = "bot:correlation_matrix"
 _CORR_CACHE_TTL = 3600  # 1 hour
 _SYMBOL_COOLDOWN_SECONDS = 300  # 5 min cooldown after closing a symbol before reopening
+_MACRO_TREND_CACHE_KEY = "bot:macro_trend_cache"
+_MACRO_TREND_CACHE_TTL = 120  # 2 minutes
+
+
+async def _get_macro_trend(redis: aioredis.Redis) -> str:
+    """Detect overall market direction from tracked pair 24h changes.
+
+    Returns "BULLISH", "BEARISH", or "NEUTRAL".
+    Cached for 2 minutes to avoid per-loop overhead.
+    """
+    cached = await redis.get(_MACRO_TREND_CACHE_KEY)
+    if cached:
+        return cached.decode() if isinstance(cached, bytes) else cached
+
+    keys = await redis.keys("price:*")
+    changes = []
+    for key in keys:
+        raw = await redis.get(key)
+        if not raw:
+            continue
+        try:
+            import json as _json
+            d = _json.loads(raw)
+            chg = d.get("change_pct")
+            if chg is not None:
+                changes.append(float(chg))
+        except Exception:
+            pass
+
+    if not changes:
+        return "NEUTRAL"
+
+    mean_chg = sum(changes) / len(changes)
+    pct_up = sum(1 for c in changes if c > 0) / len(changes)
+
+    if mean_chg > 1.5 and pct_up > 0.55:
+        trend = "BULLISH"
+    elif mean_chg < -1.5 and pct_up < 0.45:
+        trend = "BEARISH"
+    else:
+        trend = "NEUTRAL"
+
+    await redis.setex(_MACRO_TREND_CACHE_KEY, _MACRO_TREND_CACHE_TTL, trend)
+    return trend
+_TRAIL_ACTIVATION_PCT = 5.0    # start trailing at 5% effective profit
+_TRAIL_REVERSAL_PCT = 1.0      # close if price reverses 1% effective from peak
+_MIN_PROFIT_USD = 1.10         # never close a winning trade below this USD PnL (non-SL)
+_TP_TRAIL_PREFIX = "bot:tp_trail:"  # TP follower anchor per position
+_FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"  # SPOT / FUTURES / DYNAMIC
+_DISABLE_FUTURES_BUY_KEY = "bot:disable_futures_buy"  # 1 = gate FUTURES BUY to SPOT BUY
 
 
 async def _fetch_funding_rates_cached(redis: aioredis.Redis, symbols: list[str]) -> dict[str, dict]:
@@ -230,11 +280,22 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         recovery_key = "bot:recovery_mode"
         in_recovery_raw = await redis.sismember(recovery_key, str(pos_id))
         be_eligible = (side == "BUY" and take_profit > entry_price) or (side == "SELL" and take_profit < entry_price)
-        if not in_recovery_raw and effective_pnl_pct <= -1.5 and be_eligible:
+        prev_price_key = f"bot:prev_price:{pos_id}"
+        prev_price_raw = await redis.get(prev_price_key)
+        prev_price = float(prev_price_raw) if prev_price_raw else current_price
+        await redis.setex(prev_price_key, 3600, str(current_price))
+        price_moving_toward_profit = (
+            (side == "BUY" and current_price > prev_price) or
+            (side == "SELL" and current_price < prev_price)
+        )
+        regime_val = pos.get("regime", "")
+        is_trending = str(regime_val).upper() in ("TRENDING", "TRANSITION")
+        if (not in_recovery_raw and effective_pnl_pct <= -1.5 and be_eligible
+                and not price_moving_toward_profit and not is_trending):
             new_tp = entry_price
             await update_position_tp(pos_id, new_tp)
             await redis.sadd(recovery_key, str(pos_id))
-            logger.info(f"{symbol}: break-even recovery activated (PnL={effective_pnl_pct:.2f}%) — TP moved to entry ${entry_price:.4f}")
+            logger.info(f"{symbol}: break-even recovery activated (PnL={effective_pnl_pct:.2f}%) - TP moved to entry ${entry_price:.4f}")
             take_profit = new_tp
 
         manual_close = await redis.get(f"close_position:{pos_id}")
@@ -244,24 +305,84 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         else:
             close_reason = None
 
-            # Hard cap: effective loss exceeds 2% — exit before price-level SL
-            if effective_pnl_pct <= -2.0:
-                close_reason = "stop_loss"
-                logger.info(f"{symbol}: hard 2% effective loss cap triggered ({effective_pnl_pct:.2f}%)")
-            else:
+            # Trailing stop: track best (peak) price and close on reversal when profitable
+            trail_key = f"bot:trail:{pos_id}"
+            tp_trail_key = _TP_TRAIL_PREFIX + str(pos_id)
+            if effective_pnl_pct >= _TRAIL_ACTIVATION_PCT:
+                trail_raw = await redis.get(trail_key)
+                trail_best = float(trail_raw) if trail_raw else None
                 if side == "BUY":
-                    sl_hit = current_price <= stop_loss
+                    new_best = max(current_price, trail_best or current_price)
+                else:
+                    new_best = min(current_price, trail_best or current_price)
+                if trail_best is None or new_best != trail_best:
+                    await redis.setex(trail_key, 3600, str(new_best))
+                trail_raw_pct = _TRAIL_REVERSAL_PCT / max(leverage, 1)
+                if side == "BUY":
+                    trail_trigger = new_best * (1 - trail_raw_pct / 100)
+                    if current_price < trail_trigger and pnl_usdt >= _MIN_PROFIT_USD:
+                        close_reason = "trailing_stop"
+                        logger.info(
+                            f"{symbol}: trailing stop triggered (peak=${new_best:.4f} "
+                            f"trigger=${trail_trigger:.4f} effective={effective_pnl_pct:+.2f}%)"
+                        )
+                else:
+                    trail_trigger = new_best * (1 + trail_raw_pct / 100)
+                    if current_price > trail_trigger and pnl_usdt >= _MIN_PROFIT_USD:
+                        close_reason = "trailing_stop"
+                        logger.info(
+                            f"{symbol}: trailing stop triggered (peak=${new_best:.4f} "
+                            f"trigger=${trail_trigger:.4f} effective={effective_pnl_pct:+.2f}%)"
+                        )
+            elif effective_pnl_pct < 0:
+                trail_raw = await redis.get(trail_key)
+                if trail_raw:
+                    await redis.delete(trail_key)
+
+            # SL / TP checks
+            if close_reason is None:
+                if side == "BUY":
+                    sl_hit = current_price <= stop_loss or effective_pnl_pct <= -2.0
                     tp_hit = current_price >= take_profit
                 else:
-                    sl_hit = current_price >= stop_loss
+                    sl_hit = current_price >= stop_loss or effective_pnl_pct <= -2.0
                     tp_hit = current_price <= take_profit
 
                 if sl_hit:
+                    # Cap exit at SL price to prevent gap disasters — never exit worse than SL
+                    # BUY closes by selling → higher price = better → cap at max(current, SL)
+                    # SELL closes by buying back → lower price = better → cap at min(current, SL)
+                    if side == "BUY":
+                        safe_exit = max(current_price, stop_loss)
+                    else:
+                        safe_exit = min(current_price, stop_loss)
+                    current_price = safe_exit
+                    if paper:
+                        slip = 0.001 if mode == "FUTURES" else 0.0005
+                        current_price = current_price * (1 - slip) if side == "BUY" else current_price * (1 + slip)
+                    # Recalculate pnl with the capped exit price so DB records the correct value
+                    if side == "BUY":
+                        raw_pnl_pct = (current_price / entry_price - 1) * 100
+                    else:
+                        raw_pnl_pct = (entry_price - current_price) / entry_price * 100
+                    effective_pnl_pct = raw_pnl_pct * leverage
+                    pnl_usdt = notional * effective_pnl_pct / 100
                     close_reason = "stop_loss"
-                    current_price = stop_loss  # simulate fill at SL price, not gapped market price
+                    logger.info(f"{symbol}: SL triggered - exit capped at ${safe_exit:.4f} (effective {effective_pnl_pct:.2f}%)")
                 elif tp_hit:
-                    close_reason = "take_profit"
-                    current_price = take_profit  # simulate fill at TP price
+                    # TP follower: mark TP hit, keep trade open, only close on retrace below TP
+                    await redis.setex(tp_trail_key, 7200, str(take_profit))
+                    logger.info(f"{symbol}: TP hit at ${take_profit:.4f} - TP follower activated, riding the trend")
+                else:
+                    # TP follower retrace check
+                    tp_trail_raw = await redis.get(tp_trail_key)
+                    if tp_trail_raw:
+                        tp_anchor = float(tp_trail_raw)
+                        retrace = (side == "BUY" and current_price < tp_anchor) or (side == "SELL" and current_price > tp_anchor)
+                        if retrace and pnl_usdt >= _MIN_PROFIT_USD:
+                            close_reason = "take_profit"
+                            logger.info(f"{symbol}: TP follower - retraced below anchor ${tp_anchor:.4f}, closing at ${current_price:.4f}")
+                            await redis.delete(tp_trail_key)
 
         if close_reason is None:
             opened_at = pos.get("opened_at")
@@ -269,12 +390,9 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 if isinstance(opened_at, datetime) and opened_at.tzinfo is None:
                     opened_at = opened_at.replace(tzinfo=timezone.utc)
                 minutes_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
-                if minutes_open >= params["negative_trade_timeout_minutes"] and pnl_usdt < 0:
+                if minutes_open >= params["negative_trade_timeout_minutes"] and pnl_usdt < 0 and effective_pnl_pct <= -0.5:
                     close_reason = "negative_timeout"
-                    logger.info(f"{symbol}: closing after {minutes_open:.0f}min in loss (${pnl_usdt:.4f})")
-                elif minutes_open >= 30 and pnl_usdt > 0 and effective_pnl_pct < 1.0:
-                    close_reason = "profitable_timeout"
-                    logger.info(f"{symbol}: closing stagnant small profit after {minutes_open:.0f}min ({effective_pnl_pct:+.2f}%)")
+                    logger.info(f"{symbol}: closing after {minutes_open:.0f}min in loss (${pnl_usdt:.4f}, {effective_pnl_pct:.2f}%)")
 
         if close_reason:
             close_ok = True
@@ -306,6 +424,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             await redis.setex(f"bot:cooldown:{symbol}", _SYMBOL_COOLDOWN_SECONDS, "1")
 
             await redis.srem(recovery_key, str(pos_id))
+            await redis.delete(f"bot:trail:{pos_id}")
 
             # Estimate and record fee for this trade
             estimated_fee = abs(notional * settings.taker_fee_rate)  # Binance taker fee ~0.04%
@@ -343,6 +462,7 @@ async def _try_open_trade(
     params: dict,
     funding_rates: dict[str, dict] | None = None,
     regime_result: RegimeResult | None = None,
+    sell_threshold: float | None = None,
 ) -> bool:
     symbol = pair.symbol
 
@@ -371,8 +491,7 @@ async def _try_open_trade(
             side = mr_signal["side"]
             logger.info(f"{symbol}: mean-reversion override → {side} ({mr_signal['reason']})")
         else:
-            logger.debug(f"{symbol}: RANGING regime but no MR signal (rsi={pair.rsi:.1f} bb_pct={pair.bb_pct:.2f}), skipping")
-            return False
+            logger.debug(f"{symbol}: RANGING regime but no MR signal (rsi={pair.rsi:.1f} bb_pct={pair.bb_pct:.2f}), using ML direction")
 
     # Extreme funding arb: override ML direction to collect funding when rate >= 0.05%/8h
     from bot.analysis.funding_rate import is_extreme_funding
@@ -400,7 +519,7 @@ async def _try_open_trade(
     # Require higher confidence for SELL (SHORT) — except for mean-reversion signals
     is_mr_signal = regime_result is not None and regime_result.strategy == "mean_reversion"
     if side == "SELL" and not is_mr_signal:
-        sell_floor = max(params["confidence_threshold"], 0.75)
+        sell_floor = sell_threshold if sell_threshold is not None else params["confidence_threshold"]
         if effective_confidence < sell_floor:
             logger.debug(
                 f"{symbol}: skip SELL — confidence {effective_confidence:.2f} < {sell_floor:.2f}"
@@ -422,8 +541,15 @@ async def _try_open_trade(
     # Read market sentiment once — used for both mode selection and direction filter
     market_sentiment, advance_ratio = await _get_market_sentiment(redis)
 
+    # Force trade mode override (SPOT / FUTURES / DYNAMIC)
+    force_mode_raw = await redis.get(_FORCE_TRADE_MODE_KEY)
+    force_mode = force_mode_raw if force_mode_raw in ("SPOT", "FUTURES", "DYNAMIC") else None
+    effective_mode_param = force_mode if force_mode else params["mode"]
+
     # Gate FUTURES mode if funding is unfavorable and confidence is low
-    if params["mode"] != "SPOT":
+    if effective_mode_param == "FUTURES":
+        mode = "FUTURES"
+    elif effective_mode_param != "SPOT":
         funding_rate = funding_rates.get(symbol, {}).get("funding_rate", 0.0) if funding_rates else 0.0
         from bot.analysis.funding_rate import should_avoid_futures
         if should_avoid_futures(funding_rate, effective_confidence, side=side):
@@ -432,11 +558,22 @@ async def _try_open_trade(
         else:
             mode = classify_mode(
                 effective_confidence, pair.atr_pct, pair.adx,
-                trading_mode=params["mode"],
+                trading_mode=effective_mode_param,
                 confidence_threshold=params["confidence_threshold"],
             )
     else:
         mode = "SPOT"
+
+    # FUTURES BUY learning gate: if disabled, downgrade to SPOT BUY (shorts still allowed)
+    # Exception: in FUTURES-only force mode, skip BUY entirely instead of falling back to SPOT
+    if mode == "FUTURES" and side == "BUY":
+        disable_fb_raw = await redis.get(_DISABLE_FUTURES_BUY_KEY)
+        if disable_fb_raw == "1":
+            if force_mode == "FUTURES":
+                logger.debug(f"{symbol}: FUTURES BUY gated — skipping (FUTURES-only mode, no SPOT fallback)")
+                return False
+            logger.debug(f"{symbol}: FUTURES BUY gated by learning rule - switching to SPOT BUY")
+            mode = "SPOT"
 
     logger.debug(f"{symbol}: market sentiment={market_sentiment} ({advance_ratio:.0%} advancing) side={side}")
 
@@ -459,7 +596,7 @@ async def _try_open_trade(
             corr_matrix = json.loads(corr_raw)
             for open_sym in open_symbols:
                 r = abs(corr_matrix.get(symbol, {}).get(open_sym, 0.0))
-                if r >= 0.75:
+                if r >= 0.95:
                     logger.debug(f"Skip {symbol}: correlated with open {open_sym} (r={r:.2f})")
                     return False
     except Exception:
@@ -476,8 +613,14 @@ async def _try_open_trade(
     )
 
     lev = params["futures_leverage"]
-    trade_divisor = params.get("min_daily_trades") or params["max_concurrent_trades"]
-    risk_pct = 100.0 / trade_divisor if trade_divisor > 0 else settings.max_risk_per_trade_percent
+    _max_conc = params["max_concurrent_trades"]
+    # 40% of capital split equally across max concurrent trades.
+    # Both SPOT and FUTURES use the same capital share per slot.
+    # FUTURES: risk_pct = margin % (notional = margin * lev)
+    # SPOT: risk_pct = full notional % (capital locked = notional, no leverage)
+    # consumes the same effective dollar exposure as a FUTURES trade at the same slot.
+    base_risk_pct = 40.0 / _max_conc if _max_conc > 0 else settings.max_risk_per_trade_percent
+    risk_pct = base_risk_pct
 
     # Apply regime-based position size multiplier
     regime_mult = 1.0
@@ -593,6 +736,7 @@ async def _try_open_trade(
     )
     await risk.on_trade_opened()
     await ev.publish_trade_opened(redis, symbol, side, mode, fill_price, quantity, paper)
+
     return True
 
 
@@ -689,6 +833,52 @@ async def _maybe_switch_trade(
         funding_rates=funding_rates, regime_result=regime_result,
     )
 
+
+
+_ML_LEARN_INTERVAL = 60  # check every 60 loops (~5 min)
+_FUTURES_BUY_MIN_TRADES = 20  # need at least this many trades before gating
+_FUTURES_BUY_MAX_WINRATE = 0.45  # gate if win rate below this
+_FUTURES_BUY_RECOVER_RATE = 0.52  # ungate if win rate recovers above this
+
+
+async def _update_futures_buy_gate(redis: aioredis.Redis) -> None:
+    """ML self-learning: auto-gate FUTURES BUY if it is consistently losing."""
+    try:
+        from bot.db.connection import get_session
+        from sqlalchemy import text
+        async with get_session() as session:
+            row = (await session.execute(text("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN pnl_usdt > 0 THEN 1 END) as wins,
+                    COALESCE(SUM(pnl_usdt), 0) as net_pnl
+                FROM trades
+                WHERE status = 'CLOSED' AND mode = 'FUTURES' AND side = 'BUY'
+                ORDER BY closed_at DESC
+                LIMIT 50
+            """))).mappings().first()
+        if not row or int(row["total"]) < _FUTURES_BUY_MIN_TRADES:
+            return
+        total = int(row["total"])
+        wins = int(row["wins"])
+        net_pnl = float(row["net_pnl"])
+        win_rate = wins / total if total > 0 else 0.0
+        currently_disabled = (await redis.get(_DISABLE_FUTURES_BUY_KEY)) == "1"
+
+        if not currently_disabled and win_rate < _FUTURES_BUY_MAX_WINRATE and net_pnl < 0:
+            await redis.set(_DISABLE_FUTURES_BUY_KEY, "1")
+            logger.info(
+                f"ML gate: FUTURES BUY auto-disabled — win_rate={win_rate:.1%} net_pnl=${net_pnl:.2f} "
+                f"over {total} trades (threshold {_FUTURES_BUY_MAX_WINRATE:.0%})"
+            )
+        elif currently_disabled and win_rate >= _FUTURES_BUY_RECOVER_RATE and net_pnl > 0:
+            await redis.set(_DISABLE_FUTURES_BUY_KEY, "0")
+            logger.info(
+                f"ML gate: FUTURES BUY auto-enabled — win_rate={win_rate:.1%} net_pnl=${net_pnl:.2f} "
+                f"recovered (threshold {_FUTURES_BUY_RECOVER_RATE:.0%})"
+            )
+    except Exception as e:
+        logger.debug(f"_update_futures_buy_gate error: {e}")
 
 async def run_trading_engine(
     ranked_store: dict,
@@ -818,6 +1008,10 @@ async def run_trading_engine(
 
             confidence_threshold = params["confidence_threshold"]
 
+            # ML self-learning: update FUTURES BUY gate periodically
+            if _loop_count % _ML_LEARN_INTERVAL == 0:
+                await _update_futures_buy_gate(redis)
+
             # Fetch funding rates periodically (every 60s = ~12 loops)
             funding_rates = {}
             if _loop_count % 12 == 0:
@@ -871,6 +1065,20 @@ async def run_trading_engine(
                         adjusted_confidence = max(0.45, adjusted_confidence - 0.05)
                         logger.debug(f"Goal pacing: behind schedule ({goal_progress:.2f}/{goal_target:.2f}) — lowering confidence to {adjusted_confidence:.2f}")
 
+            macro_trend = await _get_macro_trend(redis)
+            sell_threshold = adjusted_confidence
+            if macro_trend == "BULLISH":
+                # Bullish market: suppress shorts, allow longs more easily
+                sell_threshold = min(0.90, adjusted_confidence + 0.20)
+                adjusted_confidence = max(0.40, adjusted_confidence - 0.05)
+                logger.debug(f"Macro trend BULLISH — BUY floor={adjusted_confidence:.2f}, SELL floor={sell_threshold:.2f}")
+            elif macro_trend == "BEARISH":
+                # Bearish market: allow shorts more easily
+                sell_threshold = max(0.40, adjusted_confidence - 0.05)
+                logger.debug(f"Macro trend BEARISH — SELL floor={sell_threshold:.2f}")
+            else:
+                logger.debug(f"Macro trend NEUTRAL — floor={adjusted_confidence:.2f}")
+
             pairs_list = ranked_store.get("pairs", [])
             # Annotate pairs with funding rate info
             for pair in pairs_list:
@@ -885,7 +1093,7 @@ async def run_trading_engine(
 
             ranked_filtered = filter_correlated_pairs(
                 pairs_list,
-                max_concurrent=params["max_concurrent_trades"],
+                max_concurrent=params["max_concurrent_trades"] * 3,
                 correlation_matrix=correlation_matrix or None,
             )
 
@@ -896,6 +1104,7 @@ async def run_trading_engine(
                     opened = await _try_open_trade(
                         pair, open_symbols, capital, redis, risk, params,
                         funding_rates=funding_rates,
+                        sell_threshold=sell_threshold,
                     )
                     if opened:
                         open_symbols.append(pair.symbol)

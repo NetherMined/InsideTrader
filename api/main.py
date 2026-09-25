@@ -470,6 +470,19 @@ class PnlPeriodResponse(BaseModel):
     net_usdt: float
 
 
+class ModeStatsItem(BaseModel):
+    total_profit_usdt: float
+    total_loss_usdt: float
+    win_count: int
+    loss_count: int
+    net_usdt: float
+
+
+class ModeBreakdownResponse(BaseModel):
+    spot: ModeStatsItem
+    futures: ModeStatsItem
+
+
 class BotStatusResponse(BaseModel):
     state: str
     daily_pnl_pct: float
@@ -521,7 +534,7 @@ async def get_trades(
 ):
     if status:
         status = status.upper()
-    where = "WHERE status = :status" if status else ""
+    status_clause = "AND status = :status" if status else ""
     result = await session.execute(
         text(f"""
             SELECT id, symbol, side, mode, entry_price, exit_price,
@@ -529,7 +542,7 @@ async def get_trades(
                    opened_at AT TIME ZONE 'UTC' AS opened_at,
                    closed_at AT TIME ZONE 'UTC' AS closed_at
             FROM trades
-            {where}
+            WHERE (archived = false OR archived IS NULL) {status_clause}
             ORDER BY opened_at DESC
             LIMIT :limit
         """),
@@ -598,7 +611,7 @@ async def get_bot_status():
                             COUNT(CASE WHEN pnl_usdt > 0 THEN 1 END) AS win_count,
                             COUNT(CASE WHEN pnl_usdt < 0 THEN 1 END) AS loss_count
                         FROM trades
-                        WHERE status = 'CLOSED'
+                        WHERE status = 'CLOSED' AND (archived = false OR archived IS NULL)
                     """)
                 )
                 row = result.mappings().first()
@@ -834,6 +847,8 @@ _LEVERAGE_KEY = "bot:futures_leverage"
 _NEG_TIMEOUT_KEY = "bot:negative_trade_timeout_minutes"
 _MODE_KEY = "bot:trading_mode"
 _MAX_DAILY_TRADES_KEY = "bot:max_daily_trades"
+_FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"
+_DISABLE_FUTURES_BUY_KEY = "bot:disable_futures_buy"
 
 
 class TradeLimitsResponse(BaseModel):
@@ -848,6 +863,8 @@ class TradeLimitsResponse(BaseModel):
     min_daily_trades: int
     min_concurrent_trades: int
     max_daily_trades: int
+    force_trade_mode: str
+    disable_futures_buy: bool
 
 
 class SetTradeLimitsRequest(BaseModel):
@@ -862,6 +879,8 @@ class SetTradeLimitsRequest(BaseModel):
     min_daily_trades: int | None = None
     min_concurrent_trades: int | None = None
     max_daily_trades: int | None = None
+    force_trade_mode: str | None = None
+    disable_futures_buy: bool | None = None
 
 
 async def _read_trade_limits(redis) -> TradeLimitsResponse:
@@ -874,6 +893,8 @@ async def _read_trade_limits(redis) -> TradeLimitsResponse:
         return int(val) if val else default
 
     mode_raw = await redis.get(_MODE_KEY)
+    force_mode_raw = await redis.get(_FORCE_TRADE_MODE_KEY)
+    disable_fb_raw = await redis.get(_DISABLE_FUTURES_BUY_KEY)
     return TradeLimitsResponse(
         max_concurrent_trades=await _int(_MAX_CONCURRENT_KEY, settings.max_concurrent_trades),
         confidence_threshold=await _float(_CONFIDENCE_KEY, settings.confidence_threshold),
@@ -882,10 +903,12 @@ async def _read_trade_limits(redis) -> TradeLimitsResponse:
         daily_loss_limit_percent=await _float(_DAILY_LOSS_LIMIT_KEY, settings.daily_loss_limit_percent),
         futures_leverage=await _int(_LEVERAGE_KEY, settings.futures_leverage),
         negative_trade_timeout_minutes=await _int(_NEG_TIMEOUT_KEY, settings.negative_trade_timeout_minutes),
-        trading_mode=mode_raw if mode_raw in ("SPOT", "DYNAMIC") else settings.trading_mode,
+        trading_mode=mode_raw if mode_raw in ("SPOT", "DYNAMIC", "FUTURES") else settings.trading_mode,
         min_daily_trades=await _int(_MIN_DAILY_TRADES_KEY, 0),
         min_concurrent_trades=await _int(_MIN_CONCURRENT_KEY, 0),
         max_daily_trades=await _int(_MAX_DAILY_TRADES_KEY, settings.max_daily_trades),
+        force_trade_mode=force_mode_raw if force_mode_raw in ("SPOT", "FUTURES", "DYNAMIC") else "DYNAMIC",
+        disable_futures_buy=disable_fb_raw == "1",
     )
 
 
@@ -925,9 +948,20 @@ async def set_trade_limits(request: SetTradeLimitsRequest):
                 await redis.set(key, str(value))
 
         if request.trading_mode is not None:
-            if request.trading_mode not in ("SPOT", "DYNAMIC"):
-                raise HTTPException(status_code=400, detail="trading_mode must be SPOT or DYNAMIC")
+            if request.trading_mode not in ("SPOT", "DYNAMIC", "FUTURES"):
+                raise HTTPException(status_code=400, detail="trading_mode must be SPOT, FUTURES, or DYNAMIC")
             await redis.set(_MODE_KEY, request.trading_mode)
+            # Keep force_trade_mode in sync so the executor always picks up the latest mode
+            if request.force_trade_mode is None:
+                await redis.set(_FORCE_TRADE_MODE_KEY, request.trading_mode)
+
+        if request.force_trade_mode is not None:
+            if request.force_trade_mode not in ("SPOT", "FUTURES", "DYNAMIC"):
+                raise HTTPException(status_code=400, detail="force_trade_mode must be SPOT, FUTURES, or DYNAMIC")
+            await redis.set(_FORCE_TRADE_MODE_KEY, request.force_trade_mode)
+
+        if request.disable_futures_buy is not None:
+            await redis.set(_DISABLE_FUTURES_BUY_KEY, "1" if request.disable_futures_buy else "0")
 
         return await _read_trade_limits(redis)
     finally:
@@ -1315,14 +1349,24 @@ async def set_currency_pref(body: dict):
 
 @app.post("/api/v1/admin/hard-reset")
 async def hard_reset(session: Annotated[AsyncSession, Depends(get_session)]):
-    """Close open positions and reset paper capital/daily stats. Preserves trade history and ML data."""
+    """Archive all trades and reset paper capital/daily stats. ML data is preserved for learning."""
     redis = await get_redis()
     try:
         await redis.set("bot:command", "stop")
         raw_start = await redis.get("paper:starting_capital_usdt")
         restore_capital = float(raw_start) if raw_start else _starting_capital
+
+        # Archive all current trades (close open ones first) — not deleted, ML still learns from them
+        await session.execute(text("""
+            UPDATE trades
+            SET archived = true,
+                status = CASE WHEN status = 'OPEN' THEN 'CLOSED' ELSE status END,
+                closed_at = CASE WHEN status = 'OPEN' AND closed_at IS NULL THEN NOW() ELSE closed_at END
+            WHERE archived = false OR archived IS NULL
+        """))
         await session.execute(text("DELETE FROM positions"))
         await session.commit()
+
         reset_keys = {
             "bot:daily_pnl": "0.0",
             "bot:daily_pnl_usdt": "0.0",
@@ -1334,7 +1378,15 @@ async def hard_reset(session: Annotated[AsyncSession, Depends(get_session)]):
         }
         await redis.mset(reset_keys)
         await redis.delete("bot:recovery_mode")
-        return {"ok": True, "message": f"Hard reset complete — capital restored to ${restore_capital:,.2f}"}
+        await redis.delete("bot:session_start_capital")
+
+        # Clear per-symbol cooldowns, TP trail anchors, and regime cache
+        for pattern in ("bot:cooldown:*", "bot:tp_trail:*", "bot:regime:*", "bot:correlation_matrix"):
+            keys = await redis.keys(pattern)
+            for k in keys:
+                await redis.delete(k)
+
+        return {"ok": True, "message": f"Reset complete — {restore_capital:,.2f} USDT restored. Trade history archived for ML learning."}
     finally:
         await redis.aclose()
 
@@ -1385,7 +1437,7 @@ async def get_pnl_stats(period: str = Query("all", description="1h | 24h | 7d | 
                         COUNT(CASE WHEN pnl_usdt > 0 THEN 1 END) AS win_count,
                         COUNT(CASE WHEN pnl_usdt < 0 THEN 1 END) AS loss_count
                     FROM trades
-                    WHERE status = 'CLOSED' AND closed_at >= :since
+                    WHERE status = 'CLOSED' AND (archived = false OR archived IS NULL) AND closed_at >= :since
                 """)
                 result = await session.execute(sql, {"since": since})
             else:
@@ -1396,7 +1448,7 @@ async def get_pnl_stats(period: str = Query("all", description="1h | 24h | 7d | 
                         COUNT(CASE WHEN pnl_usdt > 0 THEN 1 END) AS win_count,
                         COUNT(CASE WHEN pnl_usdt < 0 THEN 1 END) AS loss_count
                     FROM trades
-                    WHERE status = 'CLOSED'
+                    WHERE status = 'CLOSED' AND (archived = false OR archived IS NULL)
                 """)
                 result = await session.execute(sql)
             row = result.mappings().first()
@@ -1416,6 +1468,45 @@ async def get_pnl_stats(period: str = Query("all", description="1h | 24h | 7d | 
         loss_count=losses,
         net_usdt=round(profit + loss, 4),
     )
+
+@app.get("/api/v1/stats/mode-breakdown", response_model=ModeBreakdownResponse)
+async def get_mode_breakdown():
+    def empty() -> ModeStatsItem:
+        return ModeStatsItem(total_profit_usdt=0.0, total_loss_usdt=0.0, win_count=0, loss_count=0, net_usdt=0.0)
+
+    spot, futures = empty(), empty()
+    try:
+        async with _db_session() as session:
+            sql = text("""
+                SELECT
+                    mode,
+                    COALESCE(SUM(CASE WHEN pnl_usdt > 0 THEN pnl_usdt ELSE 0 END), 0) AS total_profit_usdt,
+                    COALESCE(SUM(CASE WHEN pnl_usdt < 0 THEN pnl_usdt ELSE 0 END), 0) AS total_loss_usdt,
+                    COUNT(CASE WHEN pnl_usdt > 0 THEN 1 END) AS win_count,
+                    COUNT(CASE WHEN pnl_usdt < 0 THEN 1 END) AS loss_count
+                FROM trades
+                WHERE status = 'CLOSED' AND (archived = false OR archived IS NULL) AND mode IS NOT NULL
+                GROUP BY mode
+            """)
+            result = await session.execute(sql)
+            for row in result.mappings():
+                mode_val = (row["mode"] or "").upper()
+                item = ModeStatsItem(
+                    total_profit_usdt=round(float(row["total_profit_usdt"]), 4),
+                    total_loss_usdt=round(float(row["total_loss_usdt"]), 4),
+                    win_count=int(row["win_count"]),
+                    loss_count=int(row["loss_count"]),
+                    net_usdt=round(float(row["total_profit_usdt"]) + float(row["total_loss_usdt"]), 4),
+                )
+                if "FUTURES" in mode_val:
+                    futures = item
+                else:
+                    spot = item
+    except Exception as e:
+        logger.error(f"mode breakdown error: {e}")
+
+    return ModeBreakdownResponse(spot=spot, futures=futures)
+
 
 
 class MarketSentimentResponse(BaseModel):

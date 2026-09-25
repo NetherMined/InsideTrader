@@ -10,6 +10,18 @@ import { X } from 'lucide-react';
 export default function PositionsPage() {
   const { display, tooltip } = useCurrency();
   const [positions, setPositions] = useState<Position[]>([]);
+  const [sortKey, setSortKey] = useState<string>('opened_at');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleSort = (key: string) => {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('desc'); }
+  };
+  const sortedPositions = [...positions].sort((a, b) => {
+    const av = (a as any)[sortKey] ?? '';
+    const bv = (b as any)[sortKey] ?? '';
+    const cmp = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv));
+    return sortDir === 'asc' ? cmp : -cmp;
+  });
   const [loading, setLoading] = useState(true);
   const [closing, setClosing] = useState<number | null>(null);
 
@@ -62,22 +74,31 @@ export default function PositionsPage() {
           <table className="w-full text-xs">
             <thead style={{ background: '#111111' }}>
               <tr style={{ color: '#848e9c' }}>
-                <th className="text-left px-4 py-2.5 font-medium">Symbol</th>
-                <th className="text-left px-4 py-2.5 font-medium">Side</th>
-                <th className="text-left px-4 py-2.5 font-medium">Mode</th>
-                <th className="text-right px-4 py-2.5 font-medium">Entry</th>
-                <th className="text-right px-4 py-2.5 font-medium">Current</th>
-                <th className="text-right px-4 py-2.5 font-medium">Qty</th>
-                <th className="text-right px-4 py-2.5 font-medium">Lev</th>
-                <th className="text-right px-4 py-2.5 font-medium">SL</th>
-                <th className="text-right px-4 py-2.5 font-medium">TP</th>
-                <th className="text-right px-4 py-2.5 font-medium">Unrealized P&L</th>
-                <th className="text-left px-4 py-2.5 font-medium">Opened</th>
+                {([
+                  ['symbol','Symbol','left'],['side','Side','left'],['mode','Mode','left'],
+                  ['entry_price','Entry','right'],['current_price','Current','right'],
+                  ['quantity','Qty','right'],['leverage','Lev','right'],
+                  ['stop_loss_price','SL','right'],['take_profit_price','TP','right'],
+                  ['unrealized_pnl','Unreal. P&L','right'],['opened_at','Opened','left'],
+                ] as [string,string,string][]).map(([col,label,align]) => (
+                  <th
+                    key={label}
+                    className={`text-${align} px-4 py-2.5 font-medium`}
+                    style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
+                      color: sortKey === col ? '#f0b90b' : '#848e9c' }}
+                    onClick={() => toggleSort(col)}
+                  >
+                    {label}
+                    <span style={{ marginLeft: 3, fontSize: 9, opacity: sortKey === col ? 1 : 0.35 }}>
+                      {sortKey === col ? (sortDir === 'asc' ? '▲' : '▼') : '▼'}
+                    </span>
+                  </th>
+                ))}
                 <th className="px-4 py-2.5"></th>
               </tr>
             </thead>
             <tbody>
-              {positions.map((p) => (
+              {sortedPositions.map((p) => (
                 <tr key={p.id} style={{ borderTop: '1px solid #1a1a1a' }}>
                   <td className="px-4 py-2 font-medium">{p.symbol}</td>
                   <td className="px-4 py-2" style={{ color: p.side === 'BUY' ? '#0ecb81' : '#f6465d' }}>

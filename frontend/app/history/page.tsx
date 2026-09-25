@@ -11,6 +11,18 @@ export default function HistoryPage() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'closed' | 'open'>('all');
+  const [sortKey, setSortKey] = useState<keyof Trade>('opened_at');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleSort = (key: keyof Trade) => {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('desc'); }
+  };
+  const sortedTrades = [...trades].sort((a, b) => {
+    const av = (a[sortKey] as any) ?? '';
+    const bv = (b[sortKey] as any) ?? '';
+    const cmp = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv));
+    return sortDir === 'asc' ? cmp : -cmp;
+  });
 
   useEffect(() => {
     const status = filter === 'all' ? undefined : filter;
@@ -104,21 +116,30 @@ export default function HistoryPage() {
           <table className="w-full text-xs">
             <thead style={{ background: '#111111' }}>
               <tr style={{ color: '#848e9c' }}>
-                <th className="text-left px-4 py-2.5 font-medium">Symbol</th>
-                <th className="text-left px-4 py-2.5 font-medium">Side</th>
-                <th className="text-left px-4 py-2.5 font-medium">Mode</th>
-                <th className="text-right px-4 py-2.5 font-medium">Entry</th>
-                <th className="text-right px-4 py-2.5 font-medium">Exit</th>
-                <th className="text-right px-4 py-2.5 font-medium">Invested</th>
-                <th className="text-right px-4 py-2.5 font-medium">P&L $</th>
-                <th className="text-right px-4 py-2.5 font-medium">P&L %</th>
-                <th className="text-left px-4 py-2.5 font-medium">Status</th>
-                <th className="text-left px-4 py-2.5 font-medium">Paper</th>
-                <th className="text-left px-4 py-2.5 font-medium">Opened</th>
+                {([
+                  ['symbol','Symbol','left'],['side','Side','left'],['mode','Mode','left'],
+                  ['entry_price','Entry','right'],['exit_price','Exit','right'],
+                  [null,'Invested','right'],
+                  ['pnl_usdt','P&L $','right'],['pnl_percent','P&L %','right'],
+                  ['status','Status','left'],['paper_trade','Paper','left'],['opened_at','Opened','left'],
+                ] as [string|null,string,string][]).map(([col,label,align]) => (
+                  <th
+                    key={label}
+                    className={`text-${align} px-4 py-2.5 font-medium`}
+                    style={{ cursor: col ? 'pointer' : 'default', userSelect: 'none', whiteSpace: 'nowrap',
+                      color: col && sortKey === col ? '#f0b90b' : '#848e9c' }}
+                    onClick={() => col && toggleSort(col as keyof Trade)}
+                  >
+                    {label}
+                    {col && <span style={{ marginLeft: 3, fontSize: 9, opacity: sortKey === col ? 1 : 0.35 }}>
+                      {sortKey === col ? (sortDir === 'asc' ? '▲' : '▼') : '▼'}
+                    </span>}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {trades.map((t) => (
+              {sortedTrades.map((t) => (
                 <tr key={t.id} style={{ borderTop: '1px solid #1a1a1a' }}>
                   <td className="px-4 py-2 font-medium">{t.symbol}</td>
                   <td className="px-4 py-2" style={{ color: t.side === 'BUY' ? '#0ecb81' : '#f6465d' }}>

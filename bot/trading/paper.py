@@ -14,6 +14,9 @@ from bot.config import settings
 
 PAPER_CAPITAL_KEY = "paper:capital_usdt"
 
+_SLIP_FUTURES = 0.0010  # 0.10% slippage on futures fills
+_SLIP_SPOT    = 0.0005  # 0.05% slippage on spot fills
+
 
 async def get_paper_capital(redis: aioredis.Redis) -> float:
     val = await redis.get(PAPER_CAPITAL_KEY)
@@ -43,19 +46,23 @@ async def simulate_buy(
     mode: str,
     leverage: int = 1,
 ) -> dict:
-    notional = quantity * price
+    slip = _SLIP_FUTURES if mode == "FUTURES" else _SLIP_SPOT
+    fill_price = price * (1 + slip)  # BUY fills at slightly higher price
+    notional = quantity * fill_price
     capital = await get_paper_capital(redis)
     margin = notional / leverage if mode == "FUTURES" else notional
 
-    if margin > capital:
-        return {"ok": False, "error": f"Insufficient paper capital (${capital:.2f} < ${margin:.2f})"}
+    open_fee = notional * settings.taker_fee_rate
+    total_cost = margin + open_fee
+    if total_cost > capital:
+        return {"ok": False, "error": f"Insufficient paper capital (${capital:.2f} < ${total_cost:.2f})"}
 
-    await update_paper_capital(redis, -margin)
+    await update_paper_capital(redis, -total_cost)
 
     result = {
         "ok": True,
         "order_id": f"PAPER-{int(datetime.now(timezone.utc).timestamp())}",
-        "fill_price": price,
+        "fill_price": fill_price,
         "notional": notional,
         "margin": margin,
         "paper": True,
@@ -63,8 +70,8 @@ async def simulate_buy(
 
     logger.info(
         f"[PAPER] {'FUTURES LONG' if mode == 'FUTURES' else 'SPOT BUY'} "
-        f"{symbol}: qty={quantity:.6f} @ ${price:.4f} = ${notional:.2f} | "
-        f"margin locked: ${margin:.2f} | capital remaining: ${capital - margin:.2f}"
+        f"{symbol}: qty={quantity:.6f} @ ${fill_price:.4f} (slip={slip:.2%}) = ${notional:.2f} | "
+        f"margin locked: ${margin:.2f} fee: ${open_fee:.4f} | capital remaining: ${capital - total_cost:.2f}"
     )
     return result
 
@@ -78,11 +85,16 @@ async def simulate_sell(
     mode: str,
     leverage: int = 1,
 ) -> dict:
-    raw_pnl_pct = (exit_price / entry_price - 1) * 100
+    slip = _SLIP_FUTURES if mode == "FUTURES" else _SLIP_SPOT
+    fill_exit = exit_price * (1 - slip)  # SELL close fills at slightly lower price
+    raw_pnl_pct = (fill_exit / entry_price - 1) * 100
     effective_pnl_pct = raw_pnl_pct * leverage
     notional = quantity * entry_price
     pnl_usdt = notional * effective_pnl_pct / 100
     margin = notional / leverage if mode == "FUTURES" else notional
+    close_fee = abs(quantity * fill_exit * settings.taker_fee_rate)
+    pnl_usdt -= close_fee
+    exit_price = fill_exit
 
     await update_paper_capital(redis, margin + pnl_usdt)
 
@@ -98,7 +110,7 @@ async def simulate_sell(
     emoji = "✅" if pnl_usdt >= 0 else "❌"
     logger.info(
         f"[PAPER] CLOSE {symbol}: {emoji} P&L ${pnl_usdt:+.4f} ({effective_pnl_pct:+.2f}%) "
-        f"entry=${entry_price:.4f} exit=${exit_price:.4f} margin={margin:.2f}"
+        f"entry=${entry_price:.4f} exit=${exit_price:.4f} margin={margin:.2f} fee=${close_fee:.4f}"
     )
     return result
 
@@ -111,19 +123,23 @@ async def simulate_sell_short(
     mode: str,
     leverage: int = 1,
 ) -> dict:
-    notional = quantity * price
+    slip = _SLIP_FUTURES if mode == "FUTURES" else _SLIP_SPOT
+    fill_price = price * (1 - slip)  # SHORT opens at slightly lower price
+    notional = quantity * fill_price
     margin = notional / leverage if mode == "FUTURES" else notional
     capital = await get_paper_capital(redis)
 
-    if margin > capital:
-        return {"ok": False, "error": f"Insufficient paper capital (${capital:.2f} < ${margin:.2f})"}
+    open_fee = notional * settings.taker_fee_rate
+    total_cost = margin + open_fee
+    if total_cost > capital:
+        return {"ok": False, "error": f"Insufficient paper capital (${capital:.2f} < ${total_cost:.2f})"}
 
-    await update_paper_capital(redis, -margin)
+    await update_paper_capital(redis, -total_cost)
 
     result = {
         "ok": True,
         "order_id": f"PAPER-SHORT-{int(datetime.now(timezone.utc).timestamp())}",
-        "fill_price": price,
+        "fill_price": fill_price,
         "notional": notional,
         "margin": margin,
         "paper": True,
@@ -146,11 +162,16 @@ async def simulate_buy_back(
     mode: str,
     leverage: int = 1,
 ) -> dict:
-    raw_pnl_pct = (entry_price / exit_price - 1) * 100
+    slip = _SLIP_FUTURES if mode == "FUTURES" else _SLIP_SPOT
+    fill_exit = exit_price * (1 + slip)  # covering short buys at slightly higher price
+    raw_pnl_pct = (entry_price / fill_exit - 1) * 100
     effective_pnl_pct = raw_pnl_pct * leverage
     notional = quantity * entry_price
     pnl_usdt = notional * effective_pnl_pct / 100
     margin = notional / leverage if mode == "FUTURES" else notional
+    close_fee = abs(quantity * fill_exit * settings.taker_fee_rate)
+    pnl_usdt -= close_fee
+    exit_price = fill_exit
 
     await update_paper_capital(redis, margin + pnl_usdt)
 
@@ -166,6 +187,6 @@ async def simulate_buy_back(
     emoji = "✅" if pnl_usdt >= 0 else "❌"
     logger.info(
         f"[PAPER] CLOSE SHORT {symbol}: {emoji} P&L ${pnl_usdt:+.4f} ({effective_pnl_pct:+.2f}%) "
-        f"entry=${entry_price:.4f} exit=${exit_price:.4f}"
+        f"entry=${entry_price:.4f} exit=${exit_price:.4f} fee=${close_fee:.4f}"
     )
     return result

@@ -188,7 +188,7 @@ async def get_pnl_summary() -> dict:
                     COUNT(CASE WHEN pnl_usdt > 0 THEN 1 END) AS win_count,
                     COUNT(CASE WHEN pnl_usdt < 0 THEN 1 END) AS loss_count
                 FROM trades
-                WHERE status = 'CLOSED'
+                WHERE status = 'CLOSED' AND (archived = false OR archived IS NULL)
             """)
         )
         row = result.mappings().first()

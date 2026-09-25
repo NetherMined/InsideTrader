@@ -49,7 +49,8 @@ async def init_db() -> None:
                 ADD COLUMN IF NOT EXISTS estimated_fee_usdt FLOAT DEFAULT 0.0,
                 ADD COLUMN IF NOT EXISTS gross_pnl_usdt FLOAT,
                 ADD COLUMN IF NOT EXISTS funding_rate FLOAT DEFAULT 0.0,
-                ADD COLUMN IF NOT EXISTS regime VARCHAR(20) DEFAULT 'UNKNOWN';
+                ADD COLUMN IF NOT EXISTS regime VARCHAR(20) DEFAULT 'UNKNOWN',
+                ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE;
         """))
     logger.info("Database schema migration applied")
 

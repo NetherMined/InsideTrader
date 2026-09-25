@@ -52,7 +52,7 @@ export function StartupModal({ onConfirmed, onClose }: Props) {
 
   if (!status || !status.awaiting_confirmation) return null;
 
-  const allReady = status.data_feed_active && status.capital_usdt > 0;
+  const allReady = status.capital_usdt > 0;
   const s = status.settings;
 
   const handleConfirm = async () => {
@@ -194,7 +194,7 @@ export function StartupModal({ onConfirmed, onClose }: Props) {
                 Starting...
               </span>
             ) : !allReady ? (
-              'Waiting for data feeds...'
+              'No capital available'
             ) : (
               `Confirm & Start ${status.paper_mode ? 'Paper' : 'Live'} Trading`
             )}
