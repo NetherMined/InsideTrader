@@ -1,7 +1,7 @@
 import type {
   Health, Market, Prediction, Position, Trade,
   BotStatus, Backtest, LivePrice, Candle,
-  TradeLimits, Goal, PnlPeriodStats,
+  TradeLimits, Goal, PnlPeriodStats, ModeBreakdown,
   AccountBalances, LiveMode, MarketSentiment, StartupStatus,
 } from './types';
 
@@ -80,6 +80,7 @@ export const api = {
     postJson<{ ok: boolean; capital_usdt: number }>('/api/v1/settings/capital', { capital_usdt }),
   pnlStats: (period: '1h' | '24h' | '7d' | '30d' | 'all') =>
     get<PnlPeriodStats>(`/api/v1/stats/pnl?period=${period}`),
+  modeBreakdown: () => get<ModeBreakdown>('/api/v1/stats/mode-breakdown'),
   getAccountBalances: () => get<AccountBalances>('/api/v1/account/balances'),
   convertAllToUsdt: () => post<{ ok: boolean; conversions: Array<{ asset: string; ok: boolean; usdt_received?: number; error?: string }> }>('/api/v1/account/convert-all'),
   getLiveMode: () => get<LiveMode>('/api/v1/settings/live-mode'),

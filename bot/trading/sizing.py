@@ -10,7 +10,8 @@ Determines how much capital to allocate per trade, respecting:
 from loguru import logger
 from bot.config import settings
 
-MIN_NOTIONAL_USDT = 10.0
+MIN_NOTIONAL_FUTURES = 35.0  # $35 notional guarantees ~$1 profit at 3% TP
+MIN_NOTIONAL_SPOT = 10.0     # Binance minimum; SPOT is fallback only, capital stays small
 
 
 def calculate_position_size(
@@ -46,13 +47,14 @@ def calculate_position_size(
         margin = notional
         notional = margin * _leverage
 
-    if notional < MIN_NOTIONAL_USDT:
-        # Bump up to minimum rather than rejecting — ensures trades open even when
-        # risk_pct formula gives a tiny slice (e.g. 100 trades / $189 capital = $1.89)
-        floored = min(MIN_NOTIONAL_USDT, available if mode == "SPOT" else capital_usdt * 0.15)
-        if floored < MIN_NOTIONAL_USDT:
+    min_notional = MIN_NOTIONAL_FUTURES if mode == "FUTURES" else MIN_NOTIONAL_SPOT
+    if notional < min_notional:
+        # Bump to mode-specific minimum. FUTURES needs $35+ for a meaningful profit.
+        # SPOT fallbacks only need Binance's $10 floor — keeps capital usage small.
+        floored = min(min_notional, available if mode == "SPOT" else capital_usdt * 0.15)
+        if floored < min_notional:
             logger.warning(
-                f"Insufficient capital for minimum position: ${available:.2f} available, ${MIN_NOTIONAL_USDT} minimum"
+                f"Insufficient capital for minimum position: ${available:.2f} available, ${min_notional} minimum"
             )
             return 0.0, 0.0
         logger.debug(f"Position bumped from ${notional:.2f} to minimum ${floored:.2f}")
@@ -81,7 +83,7 @@ def calculate_sl_tp_prices(
     _leverage = leverage if leverage is not None else settings.futures_leverage
 
     if atr_pct is not None and atr_pct > 0:
-        _tp_pct = max(2.5, min(6.0, atr_pct * 1.5))
+        _tp_pct = max(3.0, min(6.0, atr_pct * 1.5))
     else:
         _tp_pct = tp_pct if tp_pct is not None else settings.take_profit_percent
 

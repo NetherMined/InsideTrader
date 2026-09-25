@@ -135,6 +135,8 @@ export interface TradeLimits {
   min_daily_trades: number;
   min_concurrent_trades: number;
   max_daily_trades: number;
+  force_trade_mode: string;
+  disable_futures_buy: boolean;
 }
 
 export interface LivePrice {
@@ -154,6 +156,19 @@ export interface PnlPeriodStats {
   win_count: number;
   loss_count: number;
   net_usdt: number;
+}
+
+export interface ModeStats {
+  total_profit_usdt: number;
+  total_loss_usdt: number;
+  win_count: number;
+  loss_count: number;
+  net_usdt: number;
+}
+
+export interface ModeBreakdown {
+  spot: ModeStats;
+  futures: ModeStats;
 }
 
 export interface AssetBalance {

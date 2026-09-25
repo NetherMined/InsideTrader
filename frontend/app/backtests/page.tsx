@@ -8,6 +8,18 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } fro
 
 export default function BacktestsPage() {
   const [backtests, setBacktests] = useState<Backtest[]>([]);
+  const [sortKey, setSortKey] = useState<string>('total_return_pct');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleSort = (key: string) => {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('desc'); }
+  };
+  const sortedBacktests = [...backtests].sort((a, b) => {
+    const av = (a as any)[sortKey] ?? '';
+    const bv = (b as any)[sortKey] ?? '';
+    const cmp = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv));
+    return sortDir === 'asc' ? cmp : -cmp;
+  });
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
@@ -79,16 +91,26 @@ export default function BacktestsPage() {
         ) : (
           <table className="w-full text-xs">
             <thead style={{ background: '#111111' }}>
-              <tr style={{ color: '#848e9c' }}>
-                <th className="text-left px-4 py-2.5 font-medium">Symbol</th>
-                <th className="text-left px-4 py-2.5 font-medium">Strategy</th>
-                <th className="text-left px-4 py-2.5 font-medium">Timeframe</th>
-                <th className="text-right px-4 py-2.5 font-medium">Trades</th>
-                <th className="text-right px-4 py-2.5 font-medium">Win Rate</th>
-                <th className="text-right px-4 py-2.5 font-medium">Sharpe</th>
-                <th className="text-right px-4 py-2.5 font-medium">Max DD</th>
-                <th className="text-right px-4 py-2.5 font-medium">Total Return</th>
-                <th className="text-left px-4 py-2.5 font-medium">Period</th>
+              <tr>
+                {([
+                  ['symbol','Symbol','left'],['strategy','Strategy','left'],['timeframe','Timeframe','left'],
+                  ['total_trades','Trades','right'],['win_rate','Win Rate','right'],
+                  ['sharpe_ratio','Sharpe','right'],['max_drawdown','Max DD','right'],
+                  ['total_return_pct','Total Return','right'],['start_date','Period','left'],
+                ] as [string,string,string][]).map(([col,label,align]) => (
+                  <th
+                    key={label}
+                    className={`text-${align} px-4 py-2.5 font-medium`}
+                    style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
+                      color: sortKey === col ? '#f0b90b' : '#848e9c' }}
+                    onClick={() => toggleSort(col)}
+                  >
+                    {label}
+                    <span style={{ marginLeft: 3, fontSize: 9, opacity: sortKey === col ? 1 : 0.35 }}>
+                      {sortKey === col ? (sortDir === 'asc' ? '▲' : '▼') : '▼'}
+                    </span>
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>

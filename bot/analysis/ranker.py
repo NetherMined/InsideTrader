@@ -19,7 +19,7 @@ from sqlalchemy import text
 
 from bot.db.connection import async_session as _db_session
 
-CORRELATION_THRESHOLD = 0.75  # Pairs above this Pearson r are filtered
+CORRELATION_THRESHOLD = 0.95  # Pairs above this Pearson r are filtered
 
 
 @dataclass

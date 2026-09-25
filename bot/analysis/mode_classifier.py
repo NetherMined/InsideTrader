@@ -34,10 +34,11 @@ def classify_mode(
         return "FUTURES"
 
     high_confidence = confidence >= _conf_threshold
-    low_volatility = atr_pct <= settings.volatility_futures_cap_percent
-    strong_trend = adx >= settings.adx_futures_threshold
+    # FUTURES is the primary mode — only fall back to SPOT if volatility is extreme
+    # or confidence is too low. ADX is not required; moderate trends are fine with leverage.
+    extreme_volatility = atr_pct > settings.volatility_futures_cap_percent * 1.5  # > 7.5%
 
-    if high_confidence and low_volatility and strong_trend:
+    if high_confidence and not extreme_volatility:
         return "FUTURES"
 
     return "SPOT"
@@ -55,11 +56,9 @@ def mode_reason(
     return {
         "mode": classify_mode(confidence, atr_pct, adx, trading_mode, confidence_threshold),
         "confidence_ok": confidence >= _conf_threshold,
-        "volatility_ok": atr_pct <= settings.volatility_futures_cap_percent,
-        "trend_ok": adx >= settings.adx_futures_threshold,
+        "volatility_ok": atr_pct <= settings.volatility_futures_cap_percent * 1.5,
         "thresholds": {
             "confidence": _conf_threshold,
-            "max_atr_pct": settings.volatility_futures_cap_percent,
-            "min_adx": settings.adx_futures_threshold,
+            "max_atr_pct": settings.volatility_futures_cap_percent * 1.5,
         },
     }

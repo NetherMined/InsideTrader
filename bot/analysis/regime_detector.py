@@ -56,7 +56,7 @@ def detect_regime(adx: float, atr_pct: float, bb_width_pct: float) -> RegimeResu
     else:
         regime = "TRANSITION"
         strategy = "conservative"
-        confidence_mult = 0.7  # Be more conservative in transitions
+        confidence_mult = 0.85  # Be more conservative in transitions
 
     # Adjust confidence multiplier based on volatility (only for non-trending)
     if atr_pct > ATR_PCT_HIGH and regime != "TRENDING":

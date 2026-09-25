@@ -44,6 +44,8 @@ GROSS_PNL_KEY = "bot:daily_gross_pnl"
 TOTAL_FEES_KEY = "bot:cumulative_fees"
 MAX_DAILY_TRADES_KEY = "bot:max_daily_trades"
 TRADE_RETURNS_KEY = "bot:trade_returns"
+FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"
+DISABLE_FUTURES_BUY_KEY = "bot:disable_futures_buy"
 
 DEFENSIVE_PARAMS_OVERRIDE = {
     "mode": "SPOT",

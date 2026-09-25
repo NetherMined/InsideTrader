@@ -1,94 +1,32 @@
 'use client';
 
-import { fmtPrice, fmt } from '@/lib/utils';
+import { useEffect, useRef, useState } from 'react';
+import { ExternalLink, ZoomIn, ZoomOut } from 'lucide-react';
+import { fmtPrice } from '@/lib/utils';
 import { useCurrency } from '@/lib/currency';
-import { ExternalLink } from 'lucide-react';
+import { api } from '@/lib/api';
 import type { Position, Candle } from '@/lib/types';
 
-export function MiniCandleChart({
-  candles,
-  entryPrice,
-  currentPrice,
-  openedAt,
-}: {
-  candles: Candle[];
-  entryPrice: number;
-  currentPrice: number | null;
-  openedAt: string;
-}) {
-  const openedMs = new Date(openedAt).getTime();
-  const relevant = candles.filter(
-    (c) => new Date(c.open_time).getTime() >= openedMs - 3_600_000
-  );
-  const chartData = relevant.length >= 2 ? relevant : candles.slice(-8);
+type TF = '1m' | '15m' | '1h';
+const TF_LIST: TF[] = ['1m', '15m', '1h'];
+const TF_LIMIT: Record<TF, number> = { '1m': 200, '15m': 200, '1h': 200 };
 
-  if (chartData.length === 0) {
-    return (
-      <div className="h-28 flex items-center justify-center text-xs" style={{ color: '#848e9c' }}>
-        Loading chart...
-      </div>
-    );
+function calcSMA(candles: Candle[], period: number): { time: number; value: number }[] {
+  const result: { time: number; value: number }[] = [];
+  for (let i = period - 1; i < candles.length; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += candles[j].close;
+    result.push({
+      time: Math.floor(new Date(candles[i].open_time).getTime() / 1000),
+      value: sum / period,
+    });
   }
-
-  const W = 400;
-  const H = 112;
-  const PAD = 6;
-  const cW = W - PAD * 2;
-  const cH = H - PAD * 2;
-
-  const allPrices = chartData.flatMap((c) => [c.high, c.low]);
-  allPrices.push(entryPrice);
-  if (currentPrice != null) allPrices.push(currentPrice);
-
-  const pMin = Math.min(...allPrices) * 0.9997;
-  const pMax = Math.max(...allPrices) * 1.0003;
-  const range = pMax - pMin || 1;
-
-  const toY = (p: number) => PAD + cH - ((p - pMin) / range) * cH;
-  const barW = Math.max(2, (cW / chartData.length) * 0.55);
-
-  const entryY = toY(entryPrice);
-  const curY = currentPrice != null ? toY(currentPrice) : null;
-
-  return (
-    <svg
-      width="100%"
-      height={H}
-      viewBox={`0 0 ${W} ${H}`}
-      preserveAspectRatio="none"
-      style={{ display: 'block' }}
-    >
-      <line
-        x1={PAD} y1={entryY} x2={W - PAD} y2={entryY}
-        stroke="#f0b90b" strokeWidth={1.5} strokeDasharray="5,4" opacity={0.9}
-      />
-      {chartData.map((c, i) => {
-        const x = PAD + (i + 0.5) * (cW / chartData.length);
-        const isUp = c.close >= c.open;
-        const color = isUp ? '#0ecb81' : '#f6465d';
-        const bTop = toY(Math.max(c.open, c.close));
-        const bBot = toY(Math.min(c.open, c.close));
-        const bH = Math.max(1, bBot - bTop);
-        return (
-          <g key={i}>
-            <line x1={x} y1={toY(c.high)} x2={x} y2={toY(c.low)} stroke={color} strokeWidth={1} />
-            <rect x={x - barW / 2} y={bTop} width={barW} height={bH} fill={color} />
-          </g>
-        );
-      })}
-      {curY !== null && (
-        <line
-          x1={PAD} y1={curY} x2={W - PAD} y2={curY}
-          stroke="#e8e8e8" strokeWidth={1} strokeDasharray="2,5" opacity={0.6}
-        />
-      )}
-    </svg>
-  );
+  return result;
 }
 
 export function PositionChart({
   position,
-  candles,
+  candles: _passedCandles,
   showPopOut = true,
 }: {
   position: Position;
@@ -96,133 +34,408 @@ export function PositionChart({
   showPopOut?: boolean;
 }) {
   const { display, tooltip } = useCurrency();
-  const pnl = position.unrealized_pnl;
-  const pos = pnl >= 0;
-  const entryVal = position.entry_price * position.quantity;
-  const currentVal = (position.current_price ?? position.entry_price) * position.quantity;
-  const currentP = position.current_price ?? position.entry_price;
+  const containerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<any>(null);
+  const [tf, setTf] = useState<TF>('15m');
+  const [candles, setCandles] = useState<Candle[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const pctToSL = position.stop_loss_price
-    ? Math.abs((currentP - position.stop_loss_price) / currentP * 100)
-    : null;
-  const pctToTP = position.take_profit_price
-    ? Math.abs((position.take_profit_price - currentP) / currentP * 100)
-    : null;
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api
+      .candles(position.symbol, tf, TF_LIMIT[tf])
+      .then((data) => {
+        if (!cancelled) setCandles([...data].reverse());
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tf, position.symbol]);
 
-  const isBreakEven = position.take_profit_price !== null &&
-    position.take_profit_price !== undefined &&
-    Math.abs(position.take_profit_price - position.entry_price) / position.entry_price < 0.002;
-  const nearSL = pctToSL !== null && pctToSL < 0.8;
-  const nearTP = pctToTP !== null && pctToTP < 0.8;
+  useEffect(() => {
+    if (!containerRef.current || candles.length === 0) return;
 
-  const nextAction = isBreakEven ? 'Break-Even' : nearSL ? 'Near SL' : nearTP ? 'Near TP' : 'Hold';
-  const actionColor = isBreakEven ? '#f0b90b' : nearSL ? '#f6465d' : nearTP ? '#0ecb81' : '#555';
-  const methodLabel = position.mode === 'FUTURES' ? `Futures ${position.leverage}x` : 'Spot';
+    if (chartRef.current) {
+      try {
+        chartRef.current._ro?.disconnect();
+        chartRef.current.remove();
+      } catch {}
+      chartRef.current = null;
+    }
 
-  const potentialProfit = position.take_profit_price
-    ? (position.take_profit_price - position.entry_price) * position.quantity * position.leverage
-    : null;
+    import('lightweight-charts').then(({ createChart, LineStyle }) => {
+      if (!containerRef.current) return;
+
+      const chart = createChart(containerRef.current, {
+        layout: {
+          background: { color: '#0b0b0b' } as any,
+          textColor: '#848e9c',
+          fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif',
+          fontSize: 11,
+        },
+        grid: {
+          vertLines: { color: '#161616' },
+          horzLines: { color: '#161616' },
+        },
+        crosshair: {
+          vertLine: { color: '#444', labelBackgroundColor: '#1f1f1f' },
+          horzLine: { color: '#444', labelBackgroundColor: '#1f1f1f' },
+        },
+        rightPriceScale: { borderColor: '#1f1f1f' },
+        timeScale: {
+          borderColor: '#1f1f1f',
+          timeVisible: true,
+          secondsVisible: tf === '1m',
+          fixLeftEdge: false,
+          fixRightEdge: false,
+        },
+        width: containerRef.current.clientWidth,
+        height: 260,
+        handleScroll: true,
+        handleScale: true,
+      });
+
+      chartRef.current = chart;
+
+      const candleSeries = chart.addCandlestickSeries({
+        upColor: '#0ecb81',
+        downColor: '#f6465d',
+        borderVisible: false,
+        wickUpColor: '#0ecb81',
+        wickDownColor: '#f6465d',
+      });
+
+      candleSeries.setData(
+        candles.map((c) => ({
+          time: Math.floor(new Date(c.open_time).getTime() / 1000) as any,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }))
+      );
+
+      candleSeries.createPriceLine({
+        price: position.entry_price,
+        color: '#f0b90b',
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: 'Entry',
+      });
+      if (position.stop_loss_price) {
+        candleSeries.createPriceLine({
+          price: position.stop_loss_price,
+          color: '#f6465d',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'SL',
+        });
+      }
+      if (position.take_profit_price) {
+        candleSeries.createPriceLine({
+          price: position.take_profit_price,
+          color: '#0ecb81',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'TP',
+        });
+      }
+
+      const ma7 = chart.addLineSeries({
+        color: '#f0b90b',
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      ma7.setData(calcSMA(candles, 7) as any);
+
+      const ma25 = chart.addLineSeries({
+        color: '#e84393',
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      ma25.setData(calcSMA(candles, 25) as any);
+
+      const ma99 = chart.addLineSeries({
+        color: '#6c5ce7',
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      ma99.setData(calcSMA(candles, 99) as any);
+
+      const volSeries = chart.addHistogramSeries({
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'vol',
+      });
+      chart.priceScale('vol').applyOptions({
+        scaleMargins: { top: 0.8, bottom: 0 },
+      });
+      volSeries.setData(
+        candles.map((c) => ({
+          time: Math.floor(new Date(c.open_time).getTime() / 1000) as any,
+          value: c.volume,
+          color: c.close >= c.open ? 'rgba(14,203,129,0.35)' : 'rgba(246,70,93,0.35)',
+        }))
+      );
+
+      chart.timeScale().fitContent();
+
+      const ro = new ResizeObserver(() => {
+        if (containerRef.current) {
+          chart.applyOptions({ width: containerRef.current.clientWidth });
+        }
+      });
+      ro.observe(containerRef.current);
+      chartRef.current._ro = ro;
+    });
+
+    return () => {
+      if (chartRef.current) {
+        try {
+          chartRef.current._ro?.disconnect();
+          chartRef.current.remove();
+        } catch {}
+        chartRef.current = null;
+      }
+    };
+  }, [candles]);
+
+  const zoomIn = () => {
+    if (!chartRef.current) return;
+    const ts = chartRef.current.timeScale();
+    const r = ts.getVisibleLogicalRange();
+    if (r) {
+      const c = (r.from + r.to) / 2;
+      const h = (r.to - r.from) / 4;
+      ts.setVisibleLogicalRange({ from: c - h, to: c + h });
+    }
+  };
+
+  const zoomOut = () => {
+    if (!chartRef.current) return;
+    const ts = chartRef.current.timeScale();
+    const r = ts.getVisibleLogicalRange();
+    if (r) {
+      const c = (r.from + r.to) / 2;
+      const h = r.to - r.from;
+      ts.setVisibleLogicalRange({ from: c - h, to: c + h });
+    }
+  };
 
   const handlePopOut = () => {
-    const sym = encodeURIComponent(position.symbol);
     window.open(
-      `/charts?symbol=${sym}`,
+      `/charts?symbol=${encodeURIComponent(position.symbol)}`,
       `chart_${position.symbol}`,
-      'width=920,height=680,resizable=yes,scrollbars=yes'
+      'width=960,height=700,resizable=yes,scrollbars=yes'
     );
   };
 
+  const pnl = position.unrealized_pnl;
+  const isProfit = pnl >= 0;
+  const curP = position.current_price ?? position.entry_price;
+  const pctToSL = position.stop_loss_price
+    ? Math.abs(((curP - position.stop_loss_price) / curP) * 100)
+    : null;
+  const pctToTP = position.take_profit_price
+    ? Math.abs(((position.take_profit_price - curP) / curP) * 100)
+    : null;
+
   return (
-    <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <span className="font-semibold text-sm">{position.symbol}</span>
-          <span
-            className="text-xs px-1.5 py-0.5 rounded font-medium"
-            style={{
-              background: position.side === 'BUY' ? 'rgba(14,203,129,0.15)' : 'rgba(246,70,93,0.15)',
-              color: position.side === 'BUY' ? '#0ecb81' : '#f6465d',
-            }}
-          >
-            {position.side}
-          </span>
-          <span
-            className="text-xs px-1.5 py-0.5 rounded font-medium"
-            style={{
-              background: position.mode === 'FUTURES' ? 'rgba(240,185,11,0.12)' : 'rgba(14,203,129,0.10)',
-              color: position.mode === 'FUTURES' ? '#f0b90b' : '#0ecb81',
-            }}
-          >
-            {methodLabel}
-          </span>
+    <div
+      className="rounded-xl overflow-hidden"
+      style={{ background: '#0b0b0b', border: '1px solid #1f1f1f' }}
+    >
+      <div className="px-3 pt-3 pb-2">
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-sm">{position.symbol}</span>
+            <span
+              className="text-xs px-1.5 py-0.5 rounded font-medium"
+              style={{
+                background:
+                  position.side === 'BUY'
+                    ? 'rgba(14,203,129,0.15)'
+                    : 'rgba(246,70,93,0.15)',
+                color: position.side === 'BUY' ? '#0ecb81' : '#f6465d',
+              }}
+            >
+              {position.side}
+            </span>
+            <span
+              className="text-xs px-1.5 py-0.5 rounded font-medium"
+              style={{
+                background:
+                  position.mode === 'FUTURES'
+                    ? 'rgba(240,185,11,0.12)'
+                    : 'rgba(14,203,129,0.10)',
+                color: position.mode === 'FUTURES' ? '#f0b90b' : '#0ecb81',
+              }}
+            >
+              {position.mode === 'FUTURES'
+                ? `Futures ${position.leverage}x`
+                : 'Spot'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span
+              className="text-sm font-bold"
+              style={{ color: isProfit ? '#0ecb81' : '#f6465d' }}
+              title={tooltip(pnl)}
+            >
+              {isProfit ? '+' : ''}
+              {display(pnl)}
+            </span>
+            {showPopOut && (
+              <button
+                onClick={handlePopOut}
+                style={{
+                  color: '#555',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  border: 'none',
+                  padding: 0,
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = '#848e9c')}
+                onMouseLeave={(e) => (e.currentTarget.style.color = '#555')}
+              >
+                <ExternalLink size={13} />
+              </button>
+            )}
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs px-1.5 py-0.5 rounded font-semibold" style={{ background: 'rgba(132,142,156,0.1)', color: actionColor }}>
-            {nextAction}
-          </span>
-          <span className="text-sm font-bold" style={{ color: pos ? '#0ecb81' : '#f6465d' }} title={tooltip(pnl)}>
-            {pos ? '+' : ''}{display(pnl)}
-          </span>
-          {showPopOut && (
+
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3 text-xs">
+            <span style={{ color: '#f0b90b' }}>MA7</span>
+            <span style={{ color: '#e84393' }}>MA25</span>
+            <span style={{ color: '#6c5ce7' }}>MA99</span>
+          </div>
+          <div className="flex items-center gap-0.5">
+            {TF_LIST.map((t) => (
+              <button
+                key={t}
+                onClick={() => setTf(t)}
+                className="text-xs px-2 py-0.5 rounded"
+                style={{
+                  background: tf === t ? '#222' : 'transparent',
+                  color: tf === t ? '#e8e8e8' : '#555',
+                  border: tf === t ? '1px solid #333' : '1px solid transparent',
+                  cursor: 'pointer',
+                }}
+              >
+                {t}
+              </button>
+            ))}
+            <div
+              style={{
+                width: 1,
+                background: '#2a2a2a',
+                height: 14,
+                margin: '0 4px',
+              }}
+            />
             <button
-              onClick={handlePopOut}
-              title="Open in separate window"
-              className="p-1 rounded transition-colors"
-              style={{ color: '#555', background: 'transparent' }}
+              onClick={zoomIn}
+              title="Zoom in"
+              style={{
+                color: '#555',
+                padding: '2px 4px',
+                background: 'transparent',
+                cursor: 'pointer',
+                border: 'none',
+              }}
               onMouseEnter={(e) => (e.currentTarget.style.color = '#848e9c')}
               onMouseLeave={(e) => (e.currentTarget.style.color = '#555')}
             >
-              <ExternalLink size={13} />
+              <ZoomIn size={12} />
             </button>
+            <button
+              onClick={zoomOut}
+              title="Zoom out"
+              style={{
+                color: '#555',
+                padding: '2px 4px',
+                background: 'transparent',
+                cursor: 'pointer',
+                border: 'none',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = '#848e9c')}
+              onMouseLeave={(e) => (e.currentTarget.style.color = '#555')}
+            >
+              <ZoomOut size={12} />
+            </button>
+          </div>
+        </div>
+
+        <div
+          className="flex items-center gap-4 mt-1.5 text-xs"
+          style={{ color: '#848e9c' }}
+        >
+          <span>
+            Entry{' '}
+            <span style={{ color: '#f0b90b', fontWeight: 600 }}>
+              {fmtPrice(position.entry_price)}
+            </span>
+          </span>
+          <span style={{ color: '#333' }}>→</span>
+          <span>
+            Now{' '}
+            <span style={{ color: '#e8e8e8', fontWeight: 600 }}>
+              {fmtPrice(curP)}
+            </span>
+          </span>
+          {pctToSL !== null && (
+            <span>
+              SL{' '}
+              <span style={{ color: pctToSL < 0.8 ? '#f6465d' : '#555' }}>
+                {pctToSL.toFixed(2)}%
+              </span>
+            </span>
+          )}
+          {pctToTP !== null && (
+            <span>
+              TP{' '}
+              <span style={{ color: pctToTP < 0.8 ? '#0ecb81' : '#555' }}>
+                {pctToTP.toFixed(2)}%
+              </span>
+            </span>
           )}
         </div>
       </div>
 
-      <div className="flex items-center gap-3 mb-2 text-xs">
-        <span>
-          <span style={{ color: '#848e9c' }}>Entry </span>
-          <span style={{ color: '#f0b90b', fontWeight: 600 }}>{fmtPrice(position.entry_price)}</span>
-        </span>
-        <span style={{ color: '#848e9c' }}>&rarr;</span>
-        <span>
-          <span style={{ color: '#848e9c' }}>Now </span>
-          <span style={{ color: '#e8e8e8', fontWeight: 600 }}>{fmtPrice(position.current_price)}</span>
-        </span>
-        {potentialProfit !== null && (
-          <span className="ml-auto" style={{ color: '#848e9c' }}>
-            Target <span style={{ color: '#0ecb81', fontWeight: 600 }}>+{display(potentialProfit)}</span>
-          </span>
+      <div style={{ position: 'relative' }}>
+        {loading && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              height: 260,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: '#0b0b0b',
+              zIndex: 10,
+            }}
+          >
+            <span className="text-xs" style={{ color: '#444' }}>
+              Loading...
+            </span>
+          </div>
         )}
-      </div>
-
-      <div className="flex gap-4 mb-3 text-xs">
-        {pctToSL !== null && (
-          <span style={{ color: '#848e9c' }}>
-            SL <span style={{ color: pctToSL < 0.8 ? '#f6465d' : '#555' }}>{pctToSL.toFixed(2)}% away</span>
-          </span>
-        )}
-        {pctToTP !== null && (
-          <span style={{ color: '#848e9c' }}>
-            TP <span style={{ color: pctToTP < 0.8 ? '#0ecb81' : '#555' }}>{pctToTP.toFixed(2)}% away</span>
-          </span>
-        )}
-      </div>
-
-      <MiniCandleChart
-        candles={candles}
-        entryPrice={position.entry_price}
-        currentPrice={position.current_price}
-        openedAt={position.opened_at}
-      />
-
-      <div className="flex justify-between text-xs mt-2.5" style={{ color: '#848e9c' }}>
-        <span>
-          Start <span style={{ color: '#e8e8e8' }} title={tooltip(entryVal)}>{display(entryVal)}</span>
-        </span>
-        <span>
-          Now <span style={{ color: pos ? '#0ecb81' : '#f6465d' }} title={tooltip(currentVal)}>{display(currentVal)}</span>
-        </span>
+        <div ref={containerRef} style={{ width: '100%' }} />
       </div>
     </div>
   );
 }
+
+export { PositionChart as MiniCandleChart };

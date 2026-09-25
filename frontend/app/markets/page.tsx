@@ -7,6 +7,18 @@ import type { Market } from '@/lib/types';
 
 export default function MarketsPage() {
   const [markets, setMarkets] = useState<Market[]>([]);
+  const [sortKey, setSortKey] = useState<string>('volume_24h');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleSort = (key: string) => {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('desc'); }
+  };
+  const sortedMarkets = [...markets].sort((a, b) => {
+    const av = (a as any)[sortKey] ?? '';
+    const bv = (b as any)[sortKey] ?? '';
+    const cmp = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv));
+    return sortDir === 'asc' ? cmp : -cmp;
+  });
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | 'spot' | 'future'>('all');
@@ -69,12 +81,24 @@ export default function MarketsPage() {
         ) : (
           <table className="w-full text-xs">
             <thead style={{ background: '#111111' }}>
-              <tr style={{ color: '#848e9c' }}>
-                <th className="text-left px-4 py-2.5 font-medium">Symbol</th>
-                <th className="text-left px-4 py-2.5 font-medium">Base</th>
-                <th className="text-left px-4 py-2.5 font-medium">Type</th>
-                <th className="text-right px-4 py-2.5 font-medium">24h Volume</th>
-                <th className="text-right px-4 py-2.5 font-medium">Trading</th>
+              <tr>
+                {([
+                  ['symbol','Symbol','left'],['base','Base','left'],['market_type','Type','left'],
+                  ['volume_24h','24h Volume','right'],['enabled_for_trading','Trading','right'],
+                ] as [string,string,string][]).map(([col,label,align]) => (
+                  <th
+                    key={label}
+                    className={`text-${align} px-4 py-2.5 font-medium`}
+                    style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
+                      color: sortKey === col ? '#f0b90b' : '#848e9c' }}
+                    onClick={() => toggleSort(col)}
+                  >
+                    {label}
+                    <span style={{ marginLeft: 3, fontSize: 9, opacity: sortKey === col ? 1 : 0.35 }}>
+                      {sortKey === col ? (sortDir === 'asc' ? '▲' : '▼') : '▼'}
+                    </span>
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>

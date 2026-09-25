@@ -20,6 +20,18 @@ function ConfidenceBar({ value }: { value: number }) {
 
 export default function PredictionsPage() {
   const [predictions, setPredictions] = useState<Prediction[]>([]);
+  const [sortKey, setSortKey] = useState<string>('confidence');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleSort = (key: string) => {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('desc'); }
+  };
+  const sortedPredictions = [...predictions].sort((a, b) => {
+    const av = (a as any)[sortKey] ?? '';
+    const bv = (b as any)[sortKey] ?? '';
+    const cmp = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv));
+    return sortDir === 'asc' ? cmp : -cmp;
+  });
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Prediction | null>(null);
 
@@ -52,13 +64,25 @@ export default function PredictionsPage() {
           ) : (
             <table className="w-full text-xs">
               <thead style={{ background: '#111111' }}>
-                <tr style={{ color: '#848e9c' }}>
-                  <th className="text-left px-4 py-2.5 font-medium">Symbol</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Current</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Target</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Change</th>
-                  <th className="text-left px-4 py-2.5 font-medium w-36">Confidence</th>
-                  <th className="text-left px-4 py-2.5 font-medium">Mode</th>
+                <tr>
+                  {([
+                    ['symbol','Symbol','left'],['current_price','Current','right'],
+                    ['target_price','Target','right'],['predicted_change_pct','Change','right'],
+                    ['confidence','Confidence','left'],['mode_recommendation','Mode','left'],
+                  ] as [string,string,string][]).map(([col,label,align]) => (
+                    <th
+                      key={label}
+                      className={`text-${align} px-4 py-2.5 font-medium`}
+                      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
+                        color: sortKey === col ? '#f0b90b' : '#848e9c' }}
+                      onClick={() => toggleSort(col)}
+                    >
+                      {label}
+                      <span style={{ marginLeft: 3, fontSize: 9, opacity: sortKey === col ? 1 : 0.35 }}>
+                        {sortKey === col ? (sortDir === 'asc' ? '▲' : '▼') : '▼'}
+                      </span>
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>

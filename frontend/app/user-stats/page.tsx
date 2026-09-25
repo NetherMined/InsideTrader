@@ -3,7 +3,11 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { useCurrency } from '@/lib/currency';
-import type { BotStatus, PnlPeriodStats, Trade, Position } from '@/lib/types';
+import type { BotStatus, PnlPeriodStats, Trade, Position, ModeBreakdown } from '@/lib/types';
+import {
+  ComposedChart, Bar, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
+  CartesianGrid,
+} from 'recharts';
 
 function BigStat({
   label,
@@ -99,15 +103,19 @@ export default function UserStatsPage() {
   const [recentTrades, setRecentTrades] = useState<Trade[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [startingCapital, setStartingCapital] = useState<number>(0);
+  const [modeBreakdown, setModeBreakdown] = useState<ModeBreakdown | null>(null);
+  const [allTrades, setAllTrades] = useState<Trade[]>([]);
 
   const load = async () => {
-    const [s, a, t, trades, cap, pos] = await Promise.allSettled([
+    const [s, a, t, trades, cap, pos, mb, at] = await Promise.allSettled([
       api.botStatus(),
       api.pnlStats('all'),
       api.pnlStats('24h'),
       api.trades('CLOSED'),
       api.getCapital(),
       api.positions(),
+      api.modeBreakdown(),
+      api.trades('CLOSED'),
     ]);
     if (s.status === 'fulfilled') setStatus(s.value);
     if (a.status === 'fulfilled') setAllTime(a.value);
@@ -115,6 +123,8 @@ export default function UserStatsPage() {
     if (trades.status === 'fulfilled') setRecentTrades(trades.value.slice(0, 8));
     if (cap.status === 'fulfilled') setStartingCapital(cap.value.starting_capital_usdt || cap.value.capital_usdt);
     if (pos.status === 'fulfilled') setPositions(pos.value);
+    if (mb.status === 'fulfilled') setModeBreakdown(mb.value);
+    if (at.status === 'fulfilled') setAllTrades(at.value.slice().reverse());
   };
 
   useEffect(() => {
@@ -261,6 +271,140 @@ export default function UserStatsPage() {
               : 'larger than each loss'}
             . That&apos;s why the net is still {netRealizedProfit >= 0 ? 'positive' : 'negative'}.
           </div>
+        </div>
+      </div>
+
+
+      <div>
+        <SectionTitle>Spot vs Futures Breakdown</SectionTitle>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 mb-4">
+          <BigStat
+            label="Spot Profit"
+            value={display(modeBreakdown?.spot.total_profit_usdt ?? 0)}
+            sub={`${modeBreakdown?.spot.win_count ?? 0} winning trades`}
+            color="#0ecb81"
+          />
+          <BigStat
+            label="Spot Loss"
+            value={display(Math.abs(modeBreakdown?.spot.total_loss_usdt ?? 0))}
+            sub={`${modeBreakdown?.spot.loss_count ?? 0} losing trades`}
+            color="#f6465d"
+          />
+          <BigStat
+            label="Futures Profit"
+            value={display(modeBreakdown?.futures.total_profit_usdt ?? 0)}
+            sub={`${modeBreakdown?.futures.win_count ?? 0} winning trades`}
+            color="#0ecb81"
+          />
+          <BigStat
+            label="Futures Loss"
+            value={display(Math.abs(modeBreakdown?.futures.total_loss_usdt ?? 0))}
+            sub={`${modeBreakdown?.futures.loss_count ?? 0} losing trades`}
+            color="#f6465d"
+          />
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="rounded-2xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
+            <div className="text-xs font-semibold mb-3" style={{ color: '#848e9c' }}>Wins vs Losses by Mode</div>
+            <ResponsiveContainer width="100%" height={200}>
+              <ComposedChart
+                data={[
+                  {
+                    name: 'Spot',
+                    Wins: modeBreakdown?.spot.win_count ?? 0,
+                    Losses: modeBreakdown?.spot.loss_count ?? 0,
+                  },
+                  {
+                    name: 'Futures',
+                    Wins: modeBreakdown?.futures.win_count ?? 0,
+                    Losses: modeBreakdown?.futures.loss_count ?? 0,
+                  },
+                ]}
+                margin={{ top: 4, right: 8, bottom: 0, left: -10 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f1f1f" />
+                <XAxis dataKey="name" tick={{ fill: '#848e9c', fontSize: 11 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: '#848e9c', fontSize: 11 }} axisLine={false} tickLine={false} />
+                <Tooltip
+                  contentStyle={{ background: '#111', border: '1px solid #2a2a2a', borderRadius: 8 }}
+                  labelStyle={{ color: '#e8e8e8', fontWeight: 600 }}
+                  itemStyle={{ color: '#848e9c' }}
+                />
+                <Legend wrapperStyle={{ fontSize: 11, color: '#848e9c' }} />
+                <Bar dataKey="Wins" fill="#0ecb81" radius={[4, 4, 0, 0]} maxBarSize={40} />
+                <Bar dataKey="Losses" fill="#f6465d" radius={[4, 4, 0, 0]} maxBarSize={40} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="rounded-2xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
+            <div className="text-xs font-semibold mb-3" style={{ color: '#848e9c' }}>Profit vs Loss by Mode (USDT)</div>
+            <ResponsiveContainer width="100%" height={200}>
+              <ComposedChart
+                data={[
+                  {
+                    name: 'Spot',
+                    Profit: +(modeBreakdown?.spot.total_profit_usdt ?? 0).toFixed(2),
+                    Loss: +Math.abs(modeBreakdown?.spot.total_loss_usdt ?? 0).toFixed(2),
+                    Net: +(modeBreakdown?.spot.net_usdt ?? 0).toFixed(2),
+                  },
+                  {
+                    name: 'Futures',
+                    Profit: +(modeBreakdown?.futures.total_profit_usdt ?? 0).toFixed(2),
+                    Loss: +Math.abs(modeBreakdown?.futures.total_loss_usdt ?? 0).toFixed(2),
+                    Net: +(modeBreakdown?.futures.net_usdt ?? 0).toFixed(2),
+                  },
+                ]}
+                margin={{ top: 4, right: 8, bottom: 0, left: -10 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f1f1f" />
+                <XAxis dataKey="name" tick={{ fill: '#848e9c', fontSize: 11 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: '#848e9c', fontSize: 11 }} axisLine={false} tickLine={false} />
+                <Tooltip
+                  contentStyle={{ background: '#111', border: '1px solid #2a2a2a', borderRadius: 8 }}
+                  labelStyle={{ color: '#e8e8e8', fontWeight: 600 }}
+                  itemStyle={{ color: '#848e9c' }}
+                  formatter={(v: number) => `$${v.toFixed(2)}`}
+                />
+                <Legend wrapperStyle={{ fontSize: 11, color: '#848e9c' }} />
+                <Bar dataKey="Profit" fill="#0ecb81" radius={[4, 4, 0, 0]} maxBarSize={40} />
+                <Bar dataKey="Loss" fill="#f6465d" radius={[4, 4, 0, 0]} maxBarSize={40} />
+                <Line dataKey="Net" stroke="#f0b90b" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div className="rounded-2xl p-4 mt-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
+          <div className="text-xs font-semibold mb-3" style={{ color: '#848e9c' }}>Cumulative P&L Trend (last 100 trades)</div>
+          <ResponsiveContainer width="100%" height={220}>
+            <ComposedChart
+              data={(() => {
+                let spotCum = 0, futCum = 0, idx = 0;
+                return allTrades.slice(0, 100).map((t) => {
+                  const pnl = t.pnl_usdt ?? 0;
+                  const isSpot = !t.mode?.toUpperCase().includes('FUTURES');
+                  if (isSpot) spotCum = +(spotCum + pnl).toFixed(4);
+                  else futCum = +(futCum + pnl).toFixed(4);
+                  idx++;
+                  return { trade: idx, Spot: spotCum, Futures: futCum };
+                });
+              })()}
+              margin={{ top: 4, right: 8, bottom: 0, left: -10 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#1f1f1f" />
+              <XAxis dataKey="trade" tick={{ fill: '#848e9c', fontSize: 10 }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fill: '#848e9c', fontSize: 11 }} axisLine={false} tickLine={false} />
+              <Tooltip
+                contentStyle={{ background: '#111', border: '1px solid #2a2a2a', borderRadius: 8 }}
+                labelStyle={{ color: '#e8e8e8', fontWeight: 600 }}
+                itemStyle={{ color: '#848e9c' }}
+                formatter={(v: number) => `$${v.toFixed(2)}`}
+                labelFormatter={(l) => `Trade #${l}`}
+              />
+              <Legend wrapperStyle={{ fontSize: 11, color: '#848e9c' }} />
+              <Line dataKey="Spot" stroke="#0ecb81" strokeWidth={2} dot={false} />
+              <Line dataKey="Futures" stroke="#9b59b6" strokeWidth={2} dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
         </div>
       </div>
 
