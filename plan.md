@@ -26,6 +26,12 @@ The Experiments branch contains the following changes from Features:
 **Fail:** Any `SPOT BUY` appears in logs or positions page.
 **Check:** `redis-cli GET bot:force_trade_mode` → must be `FUTURES`
 
+**Result (Sep 26):** FAIL — FUTURES-only not viable in bullish market with low BUY confidence.
+- In BULLISH macro, ML produces bearish SELL signals (high confidence) and low-confidence BUY signals (<0.60)
+- FUTURES SELL in bullish market: 135 trades, 20% win rate, -$62.86
+- FUTURES BUY at low confidence (0.55–0.60) with 2x leverage: 12.5% win rate, -$4.61
+- **Decision:** Switched to `force_trade_mode=DYNAMIC`. SPOT BUY used for low-confidence trend-aligned signals; FUTURES only when model is highly confident. SPOT BUY from prior day: 40% win rate, near break-even.
+
 ### T1-02: SL Cap Direction — SELL Trade
 **Test:** Let a FUTURES SELL trade open. Observe price movement past SL threshold.
 **Pass:** Trade closes at or near SL price, loss capped at expected %.
@@ -166,6 +172,14 @@ Run Experiments branch in paper mode and collect these metrics daily:
 - Market conditions: most pairs TRENDING (ADX>25) or TRANSITION, few RANGING (ADX<20 + BB_WIDTH<0.03)
 - Low-ADX pairs (ETH ADX=11.7, BCH ADX=11.6) classify as TRANSITION not RANGING because bb_width > 0.03
 - No RANGING gates fired in first hour — check again at 48h mark via: `docker logs insidetrader-bot-1 2>&1 | grep 'RANGING regime gate'`
+
+**Observations (Sep 26):**
+- EMA trend gate (TRENDING bullish → block SELL) confirmed working; demoted to DEBUG to reduce log spam
+- Root cause of 77% loss rate confirmed: ML predicts SELL in bullish market → shorts lose
+- New macro direction filter deployed: BULLISH → block all SELL; BEARISH → block all BUY
+- Trend-aligned BUY in BULLISH uses lower confidence floor (0.55) to surface usable signals
+- Switched to DYNAMIC mode: SPOT BUY for low-confidence signals, FUTURES for high-confidence
+- Price stream fix: individual fetch fallback when batch fails → prices available from startup
 
 ---
 
