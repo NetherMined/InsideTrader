@@ -1093,8 +1093,7 @@ async def run_trading_engine(
             macro_trend = await _get_macro_trend(redis)
             sell_threshold = adjusted_confidence
             if macro_trend == "BULLISH":
-                # Bullish market: suppress shorts, allow longs more easily
-                sell_threshold = min(0.90, adjusted_confidence + 0.20)
+                # Bullish market: allow longs more easily; EMA gate handles TRENDING shorts
                 adjusted_confidence = max(0.40, adjusted_confidence - 0.05)
                 logger.debug(f"Macro trend BULLISH — BUY floor={adjusted_confidence:.2f}, SELL floor={sell_threshold:.2f}")
             elif macro_trend == "BEARISH":
