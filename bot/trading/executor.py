@@ -420,8 +420,22 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             if not close_ok:
                 continue
 
-            # Per-symbol cooldown to prevent churn (re-opening immediately after close)
-            await redis.setex(f"bot:cooldown:{symbol}", _SYMBOL_COOLDOWN_SECONDS, "1")
+            # Loss streak cooldown: extend blackout for symbols that keep losing
+            if pnl_usdt <= 0:
+                streak = int(await redis.incr(f"bot:loss_streak:{symbol}"))
+                await redis.expire(f"bot:loss_streak:{symbol}", 172800)  # 2-day TTL
+            else:
+                await redis.delete(f"bot:loss_streak:{symbol}")
+                streak = 0
+            if streak >= 3:
+                _cd = 86400    # 24h
+            elif streak >= 2:
+                _cd = 14400    # 4h
+            else:
+                _cd = _SYMBOL_COOLDOWN_SECONDS
+            if streak > 1:
+                logger.info(f"{symbol}: loss streak={streak} → cooldown {_cd // 3600:.0f}h")
+            await redis.setex(f"bot:cooldown:{symbol}", _cd, "1")
 
             await redis.srem(recovery_key, str(pos_id))
             await redis.delete(f"bot:trail:{pos_id}")
@@ -485,8 +499,14 @@ async def _try_open_trade(
 
     # Regime gate: block all trades in RANGING regime (experiment — see plan.md Phase 6)
     if regime_result is not None and regime_result.regime == "RANGING":
-        logger.info(f"{symbol}: RANGING regime gate — trade blocked (adx={regime_result.adx:.1f})")
+        logger.debug(f"{symbol}: RANGING regime gate — trade blocked (adx={regime_result.adx:.1f})")
         return False
+
+    # EMA trend gate: in TRENDING regime, block SELL when price is above EMA21 (bullish)
+    if regime_result is not None and regime_result.regime == "TRENDING" and side == "SELL":
+        if pair.ema21_ratio > 0:
+            logger.debug(f"{symbol}: TRENDING bullish (ema21={pair.ema21_ratio:.3f}) — SELL blocked")
+            return False
 
     # Phase 2: Mean-reversion signal override when in RANGING regime
     if regime_result is not None and regime_result.strategy == "mean_reversion":

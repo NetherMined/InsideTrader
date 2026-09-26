@@ -205,6 +205,7 @@ async def _analyse_symbol(symbol: str) -> dict | None:
         "rsi": float(latest.get("rsi", 50.0) or 50.0),
         "bb_pct": float(latest.get("bb_pct", 0.5) or 0.5),
         "bb_width_pct": float(latest.get("bb_width_pct", 0.05) or 0.05),
+        "ema21_ratio": float(latest.get("ema21_ratio", 0.0) or 0.0),
         "current_price": current_price,
         "target_price": target_price,
     }
