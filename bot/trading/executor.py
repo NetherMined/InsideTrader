@@ -1121,15 +1121,22 @@ async def run_trading_engine(
                 correlation_matrix=correlation_matrix or None,
             )
 
+            # Trend-aligned floor: when trading with the macro, require less confidence
+            trend_floor = max(0.50, adjusted_confidence - 0.15) if macro_trend in ("BULLISH", "BEARISH") else adjusted_confidence
+
             for pair in ranked_filtered:
                 if len(open_symbols) >= params["max_concurrent_trades"]:
                     break
-                if pair.confidence >= adjusted_confidence:
-                    pair_side = _determine_side(pair.predicted_change_pct)
-                    if macro_trend == "BULLISH" and pair_side == "SELL":
-                        continue
-                    if macro_trend == "BEARISH" and pair_side == "BUY":
-                        continue
+                pair_side = _determine_side(pair.predicted_change_pct)
+                if macro_trend == "BULLISH" and pair_side == "SELL":
+                    continue
+                if macro_trend == "BEARISH" and pair_side == "BUY":
+                    continue
+                # BUY in BULLISH or SELL in BEARISH = trading with macro → lower floor
+                with_trend = (macro_trend == "BULLISH" and pair_side == "BUY") or \
+                             (macro_trend == "BEARISH" and pair_side == "SELL")
+                floor = trend_floor if with_trend else adjusted_confidence
+                if pair.confidence >= floor:
                     opened = await _try_open_trade(
                         pair, open_symbols, capital, redis, risk, params,
                         funding_rates=funding_rates,
