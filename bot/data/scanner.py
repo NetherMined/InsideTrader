@@ -10,6 +10,12 @@ from bot.db.models import ScannedMarket
 
 MIN_VOLUME_USDT = 1_000_000
 
+# Stablecoins and near-zero-volatility tokens — excluded from trading universe
+_EXCLUDED_BASES = {
+    "USDC", "BUSD", "FDUSD", "TUSD", "USDP", "DAI", "USDD", "GUSD",
+    "PYUSD", "RLUSD", "USD1", "USDX", "EURC", "EURS", "EURI",
+}
+
 
 def _make_public_exchange(market_type: str = "spot") -> ccxt.binance:
     """Unauthenticated exchange client for public market data."""
@@ -50,6 +56,9 @@ async def scan_markets() -> list[dict]:
                         continue
                 market = exchange.markets.get(symbol)
                 if not market or not market.get("active"):
+                    continue
+
+                if market.get("base") in _EXCLUDED_BASES:
                     continue
 
                 volume = ticker.get("quoteVolume") or 0.0

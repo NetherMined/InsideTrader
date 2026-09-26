@@ -30,6 +30,20 @@ async def _get_redis() -> aioredis.Redis:
     )
 
 
+async def _validate_pairs(exchange: ccxt.binance, pairs: list[str]) -> list[str]:
+    """Return only pairs that exist as active spot markets on Binance."""
+    try:
+        markets = await exchange.load_markets()
+        valid = [p for p in pairs if p in markets and markets[p].get("active")]
+        dropped = [p for p in pairs if p not in valid]
+        if dropped:
+            logger.info(f"Price stream pre-filter: dropped {len(dropped)} invalid spot pairs, keeping {len(valid)}")
+        return valid
+    except Exception as e:
+        logger.warning(f"Market pre-validation failed, using full pair list: {e}")
+        return list(pairs)
+
+
 async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
     """Continuously poll Binance for current prices and write to Redis."""
     exchange = _make_exchange()
@@ -37,7 +51,8 @@ async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
 
     logger.info(f"Starting price stream for {len(pairs)} pairs (poll every {POLL_INTERVAL}s)")
 
-    active_pairs = list(pairs)
+    active_pairs = await _validate_pairs(exchange, pairs)
+    logger.info(f"Price stream active: {len(active_pairs)} valid spot pairs")
 
     try:
         while not stop_event.is_set():
@@ -108,29 +123,6 @@ async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
                         logger.warning(f"Dropping unknown market {bad} from price poll ({len(active_pairs)} left)")
                     else:
                         logger.warning(f"Price poll skipped unknown market: {msg}")
-                    # Fetch remaining pairs individually so prices still flow this tick
-                    tickers_fb: dict = {}
-                    for sym in list(active_pairs):
-                        try:
-                            tickers_fb[sym] = await exchange.fetch_ticker(sym)
-                        except Exception:
-                            pass
-                    if tickers_fb:
-                        pipe = redis.pipeline()
-                        for symbol, ticker in tickers_fb.items():
-                            price = ticker.get("last") or ticker.get("close")
-                            if price is None:
-                                continue
-                            pipe.set(f"price:{symbol}", json.dumps({
-                                "symbol": symbol,
-                                "price": float(price),
-                                "bid": float(ticker.get("bid") or price),
-                                "ask": float(ticker.get("ask") or price),
-                                "change_pct": float(ticker.get("percentage") or 0.0),
-                                "volume_24h": float(ticker.get("quoteVolume") or 0.0),
-                                "ts": datetime.now(timezone.utc).isoformat(),
-                            }), ex=PRICE_TTL)
-                        await pipe.execute()
                 else:
                     logger.warning(f"Price poll error: {e}")
                 await redis.set("bot:price_stream_active", str(len(active_pairs)), ex=30)

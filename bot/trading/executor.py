@@ -390,7 +390,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 if isinstance(opened_at, datetime) and opened_at.tzinfo is None:
                     opened_at = opened_at.replace(tzinfo=timezone.utc)
                 minutes_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
-                if minutes_open >= params["negative_trade_timeout_minutes"] and pnl_usdt < 0 and effective_pnl_pct <= -0.5:
+                if minutes_open >= params["negative_trade_timeout_minutes"] and pnl_usdt < 0 and effective_pnl_pct <= -0.1:
                     close_reason = "negative_timeout"
                     logger.info(f"{symbol}: closing after {minutes_open:.0f}min in loss (${pnl_usdt:.4f}, {effective_pnl_pct:.2f}%)")
 
@@ -496,11 +496,6 @@ async def _try_open_trade(
             )
         except Exception as e:
             logger.debug(f"{symbol}: regime detection failed ({e})")
-
-    # Regime gate: block all trades in RANGING regime (experiment — see plan.md Phase 6)
-    if regime_result is not None and regime_result.regime == "RANGING":
-        logger.debug(f"{symbol}: RANGING regime gate — trade blocked (adx={regime_result.adx:.1f})")
-        return False
 
     # EMA trend gate: in TRENDING regime, block SELL when price is above EMA21 (bullish)
     if regime_result is not None and regime_result.regime == "TRENDING" and side == "SELL":
