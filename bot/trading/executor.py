@@ -1125,6 +1125,11 @@ async def run_trading_engine(
                 if len(open_symbols) >= params["max_concurrent_trades"]:
                     break
                 if pair.confidence >= adjusted_confidence:
+                    pair_side = _determine_side(pair.predicted_change_pct)
+                    if macro_trend == "BULLISH" and pair_side == "SELL":
+                        continue
+                    if macro_trend == "BEARISH" and pair_side == "BUY":
+                        continue
                     opened = await _try_open_trade(
                         pair, open_symbols, capital, redis, risk, params,
                         funding_rates=funding_rates,
