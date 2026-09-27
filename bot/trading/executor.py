@@ -479,6 +479,7 @@ async def _try_open_trade(
     funding_rates: dict[str, dict] | None = None,
     regime_result: RegimeResult | None = None,
     sell_threshold: float | None = None,
+    forced_side: str | None = None,
 ) -> bool:
     symbol = pair.symbol
 
@@ -488,7 +489,7 @@ async def _try_open_trade(
         logger.debug(f"{symbol}: cooldown active — skipping")
         return False
 
-    side = _determine_side(pair.predicted_change_pct)
+    side = forced_side if forced_side else _determine_side(pair.predicted_change_pct)
 
     # Per-symbol regime detection using pair's own indicators
     if regime_result is None:
@@ -666,10 +667,13 @@ async def _try_open_trade(
         logger.debug(f"Skip {symbol}: position size too small")
         return False
 
-    # In ranging markets use a tighter TP (0.6× ATR) for faster grid-style cycling
+    # ATR multiplier for TP: range contracts, bullish overrides expand
     atr_for_tp = pair.atr_pct
     if regime_result is not None and regime_result.regime == "RANGING":
         atr_for_tp = pair.atr_pct * 0.6
+    elif forced_side == "BUY":
+        # Bullish macro override — let BUY winners run with a wider TP
+        atr_for_tp = pair.atr_pct * 1.5
 
     stop_loss, take_profit = calculate_sl_tp_prices(
         current_price, mode,
@@ -1091,8 +1095,8 @@ async def run_trading_engine(
             _, loop_advance_ratio = await _get_market_sentiment(redis)
             sell_threshold = adjusted_confidence
             if macro_trend == "BULLISH":
-                # Bullish market: allow longs more easily; EMA gate handles TRENDING shorts
-                adjusted_confidence = max(0.40, adjusted_confidence - 0.05)
+                # Bullish market: lower BUY floor significantly; override SELL→BUY in main loop
+                adjusted_confidence = max(0.40, adjusted_confidence - 0.10)
                 logger.debug(f"Macro trend BULLISH — BUY floor={adjusted_confidence:.2f}, SELL floor={sell_threshold:.2f}")
             elif macro_trend == "BEARISH":
                 # Bearish market: allow shorts more easily
@@ -1120,19 +1124,46 @@ async def run_trading_engine(
             )
 
             # Trend-aligned floor: when trading with the macro, require less confidence
-            trend_floor = max(0.50, adjusted_confidence - 0.15) if macro_trend in ("BULLISH", "BEARISH") else adjusted_confidence
+            trend_floor = max(0.45, adjusted_confidence - 0.15) if macro_trend in ("BULLISH", "BEARISH") else adjusted_confidence
 
             for pair in ranked_filtered:
                 if len(open_symbols) >= params["max_concurrent_trades"]:
                     break
                 pair_side = _determine_side(pair.predicted_change_pct)
+                override_side: str | None = None
+
                 if macro_trend == "BULLISH" and pair_side == "SELL":
-                    continue
+                    # Override SELL→BUY when pair has bullish structure
+                    # Conditions: price near/above EMA21, not overbought, some trend strength
+                    bullish_structure = (
+                        pair.ema21_ratio >= -0.03   # price within 3% of EMA21 or above
+                        and pair.rsi < 72           # not overbought
+                        and pair.adx > 10           # some momentum
+                    )
+                    if bullish_structure:
+                        if pair.bb_pct <= 0.35 and pair.rsi <= 55:
+                            entry_pattern = "pullback-long"
+                        elif pair.adx >= 20 and pair.ema21_ratio >= 0.01:
+                            entry_pattern = "trend-follow-long"
+                        elif pair.bb_pct >= 0.70:
+                            entry_pattern = "breakout-long"
+                        else:
+                            entry_pattern = "bullish-long"
+                        logger.debug(
+                            f"{pair.symbol}: BULLISH {entry_pattern} override "
+                            f"(ema21={pair.ema21_ratio:.3f} rsi={pair.rsi:.1f} bb={pair.bb_pct:.2f} adx={pair.adx:.1f})"
+                        )
+                        pair_side = "BUY"
+                        override_side = "BUY"
+                    else:
+                        continue  # truly bearish pair — skip even in bull market
+
                 if macro_trend == "BEARISH" and pair_side == "BUY":
                     continue
                 # NEUTRAL but broad market still advancing — block shorts
                 if macro_trend == "NEUTRAL" and pair_side == "SELL" and loop_advance_ratio >= 0.60:
                     continue
+
                 # BUY in BULLISH or SELL in BEARISH = trading with macro → lower floor
                 with_trend = (macro_trend == "BULLISH" and pair_side == "BUY") or \
                              (macro_trend == "BEARISH" and pair_side == "SELL")
@@ -1142,6 +1173,7 @@ async def run_trading_engine(
                         pair, open_symbols, capital, redis, risk, params,
                         funding_rates=funding_rates,
                         sell_threshold=sell_threshold,
+                        forced_side=override_side,
                     )
                     if opened:
                         open_symbols.append(pair.symbol)
