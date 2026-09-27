@@ -87,9 +87,9 @@ async def _get_macro_trend(redis: aioredis.Redis) -> str:
     mean_chg = sum(changes) / len(changes)
     pct_up = sum(1 for c in changes if c > 0) / len(changes)
 
-    if mean_chg > 1.5 and pct_up > 0.55:
+    if mean_chg > 0.3 and pct_up > 0.55:
         trend = "BULLISH"
-    elif mean_chg < -1.5 and pct_up < 0.45:
+    elif mean_chg < -0.3 and pct_up < 0.45:
         trend = "BEARISH"
     else:
         trend = "NEUTRAL"
@@ -371,8 +371,10 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                     logger.info(f"{symbol}: SL triggered - exit capped at ${safe_exit:.4f} (effective {effective_pnl_pct:.2f}%)")
                 elif tp_hit:
                     # TP follower: mark TP hit, keep trade open, only close on retrace below TP
-                    await redis.setex(tp_trail_key, 7200, str(take_profit))
-                    logger.info(f"{symbol}: TP hit at ${take_profit:.4f} - TP follower activated, riding the trend")
+                    # Use SET NX so the key is written only once — prevents log spam every 5s
+                    newly_set = await redis.set(tp_trail_key, str(take_profit), nx=True, ex=7200)
+                    if newly_set:
+                        logger.info(f"{symbol}: TP hit at ${take_profit:.4f} - TP follower activated, riding the trend")
                 else:
                     # TP follower retrace check
                     tp_trail_raw = await redis.get(tp_trail_key)
@@ -499,7 +501,7 @@ async def _try_open_trade(
 
     # EMA trend gate: in TRENDING regime, block SELL when price is above EMA21 (bullish)
     if regime_result is not None and regime_result.regime == "TRENDING" and side == "SELL":
-        if pair.ema21_ratio > 0:
+        if pair.ema21_ratio >= 0:
             logger.debug(f"{symbol}: TRENDING bullish (ema21={pair.ema21_ratio:.3f}) — SELL blocked")
             return False
 
@@ -1086,6 +1088,7 @@ async def run_trading_engine(
                         logger.debug(f"Goal pacing: behind schedule ({goal_progress:.2f}/{goal_target:.2f}) — lowering confidence to {adjusted_confidence:.2f}")
 
             macro_trend = await _get_macro_trend(redis)
+            _, loop_advance_ratio = await _get_market_sentiment(redis)
             sell_threshold = adjusted_confidence
             if macro_trend == "BULLISH":
                 # Bullish market: allow longs more easily; EMA gate handles TRENDING shorts
@@ -1126,6 +1129,9 @@ async def run_trading_engine(
                 if macro_trend == "BULLISH" and pair_side == "SELL":
                     continue
                 if macro_trend == "BEARISH" and pair_side == "BUY":
+                    continue
+                # NEUTRAL but broad market still advancing — block shorts
+                if macro_trend == "NEUTRAL" and pair_side == "SELL" and loop_advance_ratio >= 0.60:
                     continue
                 # BUY in BULLISH or SELL in BEARISH = trading with macro → lower floor
                 with_trend = (macro_trend == "BULLISH" and pair_side == "BUY") or \
