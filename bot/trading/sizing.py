@@ -91,11 +91,18 @@ def calculate_sl_tp_prices(
     # Leverage amplifies the margin P&L (e.g. 2% SL at 5x = 10% margin loss)
     # but the price target stays at 2% to give trades room to breathe.
 
+    # Hybrid ATR SL: use whichever gives a wider stop — the level preset % or 1.3× ATR
+    # This prevents stops from being too tight in high-volatility regimes
+    if atr_pct is not None and atr_pct > 0:
+        _sl_distance = max(entry_price * _sl_pct / 100, entry_price * atr_pct / 100 * 1.3)
+    else:
+        _sl_distance = entry_price * _sl_pct / 100
+
     if side == "BUY":
-        stop_loss = entry_price * (1 - _sl_pct / 100)
+        stop_loss = entry_price - _sl_distance
         take_profit = entry_price * (1 + _tp_pct / 100)
     else:
-        stop_loss = entry_price * (1 + _sl_pct / 100)
+        stop_loss = entry_price + _sl_distance
         take_profit = entry_price * (1 - _tp_pct / 100)
 
     return round(stop_loss, 8), round(take_profit, 8)

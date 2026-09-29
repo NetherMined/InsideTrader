@@ -1,277 +1,209 @@
 # InsideTrader — Trading Strategy Reference
 
-**Strategy:** ML trend-following bot with dynamic SPOT / FUTURES mode selection.
-**Exchange:** Binance Spot + Futures (via CCXT) | **Timeframe:** 1h candles
-**ML Model:** XGBoost regression + classifier (90 days of 1h OHLCV + technical indicators)
+## Overview
 
-> ⚠️ No strategy works in every regime. Futures with leverage can liquidate your position rapidly. Paper-trading first — live trading requires manual activation. Never risk capital you cannot afford to lose.
+The bot operates three distinct macro-driven strategies, automatically switching between them based on real-time market conditions. Every 60-second executor loop, the macro trend is recomputed from price data across all 67 tracked USDT pairs and classified as **BULLISH**, **NEUTRAL**, or **BEARISH**. This classification gates which trade directions are allowed, adjusts confidence thresholds, and controls take-profit sizing.
 
 ---
 
-## Strategy Classification
+## Macro Trend Classification
 
-The InsideTrader bot falls under **Trend-Following / Momentum** as classified in `strat.md` analysis:
+**Source:** `bot/trading/executor.py` — `_get_macro_trend()`
+**Data:** 24h price changes across all tracked pairs from Redis `price:*` keys
+**Cache TTL:** 120 seconds
 
-| Metric | `strat.md` Range | InsideTrader Target |
-|---|---|---|
-| Win rate | 55–72% | 55–72% (futures only when model ≥ conf threshold) |
-| Risk:Reward | 2:1 to 4:1 | 1:1.5 default (SL 2% / TP 3%) |
-| Best condition | Strong trends | ADX ≥ 25, ATR ≤ 5%, confidence ≥ 0.75 |
-| Drawdown | Medium–High | Controlled by 10% daily kill-switch |
-
----
-
-## Core Strategy Logic
-
-For each candidate symbol, the **Market Mode Classifier** decides SPOT or FUTURES:
-
-```
-confidence >= 0.75  AND  ATR% <= 5%  AND  ADX >= 25  →  FUTURES (2x leverage)
-otherwise                                                  →  SPOT
-```
-
-All three conditions must pass for FUTURES; any failure defaults to SPOT.
-
-**Why dynamic mode?** Futures amplify returns when the model is confident and the market is trending (strong ADX, low volatility), but force spot-only when conditions are uncertain — protecting capital from liquidation on low-confidence signals.
+| Regime | Condition |
+|--------|-----------|
+| BULLISH | mean 24h change > +0.3% AND advance_ratio > 55% of pairs rising |
+| BEARISH | mean 24h change < -0.3% AND advance_ratio < 45% of pairs rising |
+| NEUTRAL | all other conditions (moderate move or mixed breadth) |
 
 ---
 
-## Trading Rules
+## Strategy 1 — BULLISH
 
-| Rule | Value | Source | Notes |
-|---|---|---|---|
-| **Min daily trades** | **100** | `update.md` | Floor enforced by lowering confidence threshold |
-| **Max concurrent trades** | **3** | `PROJECT_PLAN.md` | Hard cap given $92 capital |
-| **Max risk per trade** | **30%** | `strat.md` update | Position size cap per trade |
-| **Max single-coin exposure** | **30%** | `CONFIG_REQUIRED.md` | Prevents over-concentration |
-| **Futures leverage** | **2x** | `PROJECT_PLAN.md` | Conservative; not >2x |
-| **Daily profit target** | **+2%** | `PROJECT_PLAN.md` | Pauses new trades on hit |
-| **Daily loss kill-switch** | **-10%** | `PROJECT_PLAN.md` | Hard stop — halts all trading |
-| **Negative-trade close** | **Immediate (next loop tick ≈ 60s)** | `update.md` | Configurable via `negative_trade_timeout_minutes` |
-| **Paper trading** | **ON by default** | `update.md` | Live requires manual enable |
-| **Stop-loss** | **2%** per trade | `CONFIG_REQUIRED.md` | Tight per-trade SL |
-| **Take-profit** | **3%** per trade | `CONFIG_REQUIRED.md` | R:R = 1:1.5 |
+**Trigger:** macro_trend == "BULLISH"
 
-### Immediate Negative-Trade Close (`update.md`)
+### Direction Gate
+- All SELL-side pairs are evaluated for a **SELL→BUY override** before being skipped
+- Pairs that fail the bullish structure check are discarded — no shorts are opened in a bull market
 
-If an open trade enters negative P&L, it is closed **on the next bot loop tick** (≈60s). The position is closed and the bot immediately scans for a new opportunity. Timeout defaults to **0 minutes** (immediate) — can be configured via `negative_trade_timeout_minutes`.
+### Bullish Structure Override (SELL → BUY)
+When a pair is ML-predicted as SELL but macro is BULLISH, it passes a three-part structure check:
 
-This enforces strict discipline: cut losers instantly, never average down. The trade is closed regardless of how small the loss, and the bot re-enters only when a new signal appears.
+| Check | Condition | Meaning |
+|-------|-----------|---------|
+| EMA21 proximity | `ema21_ratio >= -0.03` | Price no more than 3% below EMA21 |
+| Not overbought | `rsi < 72` | RSI below overbought territory |
+| Trend momentum | `adx > 10` | Some directional strength present |
 
----
+If all three pass, the pair is **forced to BUY** regardless of ML prediction. Pairs that fail any check are skipped entirely.
 
-## Risk Management
+### Entry Patterns (logged on each override trade)
+| Pattern | Condition |
+|---------|-----------|
+| pullback-long | bb_pct <= 0.35 AND rsi <= 55 — price at lower BB, RSI not extended |
+| trend-follow-long | adx >= 20 AND ema21_ratio >= 0.01 — strong trend, price above EMA21 |
+| breakout-long | bb_pct >= 0.70 — price at upper BB, momentum breakout |
+| bullish-long | fallback for all other passing pairs |
 
-### The 30% Rule
-- **Max 30% of portfolio** allocated to any single trade
-- **Max 30% of portfolio** in any single asset at once
-- Position sizing uses `calculate_position_size()` — respects both per-trade cap and single-coin exposure cap
-- For $92 capital: ~$27 max per trade, ~$27 max per asset
+### Confidence Thresholds
+- Base confidence adjustment: `adjusted_confidence - 0.10` (floor: 0.40)
+- Trend-aligned floor: `trend_floor = max(0.45, adjusted_confidence - 0.15)`
+- Sell threshold is held at full `adjusted_confidence` — effectively blocking shorts
+- Additional -0.08 reduction if below min_daily_trades target (floor 0.45)
+- Additional -0.05 reduction if goal progress below 50% of target
 
-### Daily Kill-Switch
-- **-10% daily loss** triggers emergency halt
-- All positions closed; no new trades until next UTC day
-- Kill-switch state persists across bot restarts via Redis
-- **Defensive mode** auto-activates on kill-switch: switches to SPOT-only, tighter SL/TP, lower confidence threshold
+### Take-Profit Sizing
+| Trade Type | ATR Multiplier |
+|------------|---------------|
+| Forced BUY (SELL→BUY override) | 1.5x ATR |
+| Standard BUY (ML-confirmed) | 1.0x ATR |
+| RANGING regime trade | 0.6x ATR |
 
-### Immediate Negative-Trade Close
-- **Default: 0 minutes** (immediate close on next loop tick)
-- Position closes the moment P&L goes negative
-- Bot immediately re-scans for next opportunity
-- Configurable via `negative_trade_timeout_minutes` in `.env` if longer tolerance is desired
+### Stop-Loss
+Controlled by Trading Level preset (see below). Defaults: SL = 1.5–3%, TP = 2–5% of entry price.
 
-### Per-Trade Risk Summary
-| Scenario | Risk | Notes |
-|---|---|---|
-| SPOT trade | Up to 30% of portfolio | SL at 2% below entry |
-| FUTURES trade (2x) | Up to 30% of portfolio margin | Effective SL = 1% of position (2% / 2x leverage) |
-| Worst-case daily | -10% portfolio | Kill-switch halts everything |
+### Trade Mode
+Mode classifier applies normally: FUTURES BUY if confidence, ATR, and ADX all pass thresholds. Falls back to SPOT BUY if any condition fails. No short (SELL FUTURES) positions are opened in BULLISH macro.
 
----
-
-## Regime Adaptation & Mode Selection
-
-### What `strat.md` Says
-> "No strategy works in every regime. Grids and mean-reversion fail in strong trends; pure trend systems chop in ranges. The highest-performing bots adapt or switch strategies."
-
-### InsideTrader Adaptation
-The bot currently uses **dynamic SPOT/FUTURES mode switching** as its primary regime adaptation:
-
-| Market Condition | Bot Behavior | Regime Fit |
-|---|---|---|
-| Strong trend (ADX ≥ 25, ATR ≤ 5%) | **FUTURES 2x** — captures trend amplified | ✅ Trending |
-| Choppy/uncertain (any gate fails) | **SPOT only** — no liquidation risk | ⚠️ Ranging (trend-following still active) |
-| High volatility (ATR > 5%) | **SPOT only** — avoids leverage risk | ✅ High-vol |
-
-### Gap: No Mean-Reversion in Ranges
-`strat.md` notes that pure trend systems chop in ranges. The current bot defaults to SPOT in ranging conditions but **still uses trend-following signals**. This means:
-- In ranges, the bot takes trend signals on spot → likely lower win rate
-- **Improvement opportunity:** Add a regime detector that switches to mean-reversion logic (RSI/Bollinger extremes) when ADX < 15 and ATR is low
+### Summary
+The BULLISH strategy is an aggressive long-only mode. The bot opens BUY positions on ML-confirmed longs and additionally overrides ML-bearish signals when the underlying price structure is still bullish. Wider TP targets (1.5x ATR) allow winners to run in strong uptrends. The confidence floor is significantly lowered to maximize trade count during favorable conditions.
 
 ---
 
-## Trade Frequency Strategy
+## Strategy 2 — NEUTRAL
 
-### 100 Trades/Day Floor (`update.md`)
+**Trigger:** macro_trend == "NEUTRAL"
 
-The bot must execute a **minimum of 100 trades per 24h window**. When the trade count is below the floor, the confidence threshold is lowered to force more entries.
+### Direction Gate
+- Both BUY and SELL pairs are allowed by default
+- **Soft SELL block:** if advance_ratio >= 0.60 (60%+ of pairs advancing), SELL-side pairs are additionally blocked to avoid shorting a broadly advancing market even in NEUTRAL classification
 
-| Condition | Confidence Adjustment | Risk Implication |
-|---|---|---|
-| Trades ≥ 100 | Normal threshold (0.75 for futures) | Standard risk |
-| Trades < 100 | Lowered progressively (max reduction ~0.10–0.15) | **Higher frequency, lower quality** |
+### Entry Conditions
+- No directional confidence discount applied — full `adjusted_confidence` is used as the threshold
+- SELL threshold: `params["confidence_threshold"]` (no adjustment)
+- BUY threshold: `params["confidence_threshold"]` (no adjustment)
 
-**`strat.md` Warning Applied:**
-> "High-frequency grids or scalpers often look great in backtests and mediocre live."
-> "Fees, funding, and slippage matter a lot."
+### Regime-Specific Behavior
+Within NEUTRAL macro, individual symbol regimes still apply:
 
-The 100-trade floor increases fee exposure. **Monitor daily P&L to confirm the floor is net-positive after fees.** If the floor is destroying profitability, consider reducing to 50 trades/day or removing the floor entirely in favor of quality-over-quantity.
+| Symbol Regime | Behavior |
+|---------------|----------|
+| TRENDING (ADX >= 25) | Full ATR TP, confidence multiplier 1.0x, standard entry |
+| RANGING (ADX < 20, low BB width) | Tight ATR TP (0.6x), confidence multiplier 0.8x, mean-reversion entry style |
+| TRANSITION (ADX 20–25) | Conservative multiplier 0.85x, confidence threshold raised +0.05 |
+| High volatility (ATR > threshold, non-TRENDING) | Confidence cap at 0.6x regardless of regime |
 
-### Trade Distribution Target
-- **100 trades/day** = ~4 trades/hour over 24h, or ~8 trades/hour over 12h active window
-- At 3 max concurrent: positions rotate frequently (avg ~33 min per trade)
-- Combined with immediate negative-trade close (0 min timeout), trades close fast → high turnover
+### Mean-Reversion Trades (RANGING symbols)
+When a symbol is classified RANGING and a mean-reversion signal is present (MR signal strength >= 0.5), the bot may override ML direction to trade against the recent move — buying oversold dips or selling overbought peaks. These trades use 0.6x ATR take-profit to cycle profits quickly.
 
----
+### Funding Rate Arbitrage
+When a futures funding rate >= 0.05% per 8h is detected, the bot may override ML direction to collect the funding payment. This applies in NEUTRAL macro where both directions are open. Longs collect when funding is positive (market is paying longs); shorts collect when funding is negative.
 
-## Funding Rate Considerations
+### Take-Profit Sizing
+| Regime | ATR Multiplier |
+|--------|---------------|
+| TRENDING | 1.0x ATR |
+| RANGING | 0.6x ATR |
+| TRANSITION | 1.0x ATR |
 
-### `strat.md` Insight
-> "Funding rate arbitrage stands out for 'wins much larger than combined losses.' When funding is elevated (>0.05–0.10% per 8h), periodic payments create consistent positive expectancy."
-
-### Current Bot Gap
-The bot is **pure directional** and does not account for funding rates. On FUTURES positions:
-- **Long positions** pay funding when rate is positive (common in bull markets)
-- **Short positions** pay funding when rate is negative
-- With 100 trades/day and immediate negative close, most positions are short-lived → funding impact is reduced but still present on any position held >15 min
-
-### Recommended Improvement
-Add funding rate monitoring to the mode classifier:
-```python
-# Pseudo-code for funding-aware mode switch
-if funding_rate > 0.01%:  # positive funding = longs pay
-    prefer_side = "SHORT"  # collect funding
-elif funding_rate < -0.01%:  # negative funding = shorts pay
-    prefer_side = "LONG"  # collect funding
-```
-
-This would let the bot **collect funding** rather than pay it, aligning with `strat.md`'s recommendation for high consistency.
+### Summary
+The NEUTRAL strategy is balanced and regime-aware. It allows both long and short entries but applies individual symbol analysis (regime detection, mean-reversion signals, funding arb) to select the optimal direction and sizing. It is the most rules-driven mode, deferring fully to ML model direction and symbol-level regime classification.
 
 ---
 
-## Leverage Assessment
+## Strategy 3 — BEARISH
 
-### `strat.md` Perspective
-> "Leverage is a double-edged sword. Most impressive ROI numbers use 5–20x+ leverage. That multiplies both gains and the chance of liquidation."
-> "2x leverage is intentional and reasonable per `strat.md` standards."
+**Trigger:** macro_trend == "BEARISH"
 
-### InsideTrader Choice: **2x** ✅
-- Conservative end of the spectrum
-- Effective SL = 1% of position value (2% SL / 2x leverage)
-- Reduces liquidation risk significantly vs 5x+
-- **Recommendation:** Stick with 2x. Only increase if paper-trading shows consistent profitability at 2x with high win rate.
+### Direction Gate
+- All BUY-side pairs are blocked — no long positions are opened in a bear market
+- Only SELL-side pairs (ML-predicted negative change) are eligible
 
----
+### Entry Conditions
+- Sell threshold is **softened**: `sell_threshold = max(0.40, adjusted_confidence - 0.05)`
+- This lowers the bar for short entries by 5 percentage points (floor 0.40), making the bot more willing to open shorts when the market is broadly falling
+- Standard confidence threshold applies as the BUY floor (but BUY is blocked, so this is irrelevant)
 
-## Diversification & Multi-Approach
+### Trade Mode
+- FUTURES SELL (short) allowed if Binance API has futures permissions and mode classifier passes (confidence, ATR, ADX thresholds met)
+- SPOT SELL is a sell/close of held positions — not a fresh short
+- No forced BUY overrides apply
 
-### `strat.md` Recommendation
-> "Diversify across a few uncorrelated approaches rather than putting everything into one 'best' method."
+### Confidence Thresholds
+- `adjusted_confidence - 0.05` for sell floor (floor: 0.40)
+- No bullish floor discounts apply
+- Additional -0.08 reduction if below min_daily_trades target
+- Additional -0.05 reduction if goal progress below 50%
 
-### Current State
-The bot uses a **single approach** (ML trend-following with dynamic SPOT/FUTURES).
+### Take-Profit Sizing
+| Regime | ATR Multiplier |
+|--------|---------------|
+| TRENDING | 1.0x ATR |
+| RANGING | 0.6x ATR |
 
-### Recommended Improvement Phases
-1. **Phase A:** Add **funding rate collection** as a secondary strategy (low risk, high consistency)
-2. **Phase B:** Add **regime detector** that switches between trend-following and mean-reversion
-3. **Phase C:** Add **portfolio rebalancing** logic to spread across uncorrelated assets
+### Loss Streak Protection
+The loss streak cooldown (bot/trading/executor.py) applies equally in all macro regimes:
+- Any closed losing trade: 5-minute base cooldown per symbol
+- Loss streak >= 2: 4-hour cooldown
+- Loss streak >= 3: 24-hour cooldown
+- Win: streak counter reset
 
----
-
-## Comparison: Current vs `strat.md` Ideal Profile
-
-| `strat.md` Ideal | InsideTrader Current | Alignment |
-|---|---|---|
-| High win rate + high R:R | 55–72% win rate, 1:1.5 R:R | ⚠️ R:R could be improved |
-| Funding-rate arbitrage | Not implemented | ❌ Major gap |
-| Adaptive/hybrid strategies | Mode-switch only (trend always) | ⚠️ Partial |
-| Risk ≤1–2% per trade | 30% position size, ~0.5–1% effective risk | ✅ OK |
-| Diversified approaches | Single approach | ❌ Needs improvement |
-| 2x leverage | 2x | ✅ |
-| Immediate loss cutting | Immediate (0 min default) | ✅ |
-| 100 trades/day floor | 100 trades/day | ✅ |
-| Monitor profit factor | Not explicitly tracked | ⚠️ Add tracking |
-| Kill-switch at -10% | -10% | ✅ |
+### Summary
+The BEARISH strategy is a short-only mode. The bot opens SELL/FUTURES SELL positions on ML-predicted downside setups. The confidence bar for shorts is slightly lowered to increase trade frequency during broad market declines. All long entries are blocked regardless of individual symbol signals.
 
 ---
 
-## Implementation Status
+## Trading Level Presets
 
-| Improvement | Status | File |
-|---|---|---|
-| Funding rate monitoring | ✅ Implemented | `bot/analysis/funding_rate.py` |
-| Funding rate caching (5min) | ✅ Implemented | `bot/trading/executor.py` |
-| Funding-side preference | ✅ Implemented | `bot/analysis/funding_rate.py`, `bot/trading/executor.py` |
-| Funding gate on FUTURES mode | ✅ Implemented | `bot/trading/executor.py` |
-| Regime detection (TRENDING/RANGING/TRANSITION) | ✅ Implemented | `bot/analysis/regime_detector.py` |
-| Regime-based position sizing | ✅ Implemented | `bot/analysis/regime_detector.py`, `bot/trading/executor.py` |
-| Correlation filter (real Pearson) | ✅ Implemented | `bot/analysis/ranker.py`, `bot/trading/executor.py` |
-| Correlation matrix caching (1h Redis) | ✅ Implemented | `bot/trading/executor.py`, `bot/main.py` |
-| Fee tracking (gross vs net P&L) | ✅ Implemented | `bot/trading/risk.py`, `bot/trading/journal.py` |
-| Fee impact warnings | ✅ Implemented | `bot/trading/risk.py` |
-| Profit factor tracking | ✅ Implemented | `bot/trading/risk.py` via `check_fee_impact()` |
-| Max daily trade count cap | ✅ Implemented | `bot/config.py`, `bot/trading/risk.py` |
-| Sharpe ratio tracking | ✅ Implemented | `bot/trading/risk.py` (`get_sharpe_ratio()`) |
-| Mean-reversion signals (RSI/BB) | ✅ Implemented | `bot/analysis/regime_detector.py`, `bot/trading/executor.py` |
-| Funding confidence boost/penalty | ✅ Implemented | `bot/trading/executor.py` |
-| Portfolio diversification | ⚠️ Partial — correlation filter avoids correlated pairs; single strategy | — |
-| Fee/slippage in backtesting | ✅ Implemented | `bot/analysis/backtest.py` (0.1% fee + 0.05% slippage per side) |
-| Adaptive leverage | ⏳ Planned | — |
-| Multi-timeframe confirmation | ⏳ Planned | — |
-| News/event filter | ⏳ Planned | — |
+Applied at all three macro strategies. Level is set via Settings page and stored in Redis (`bot:trading_level`).
+
+| Level | Mode | Confidence | SL | TP | Max Trades | Kill Switch |
+|-------|------|------------|----|----|------------|-------------|
+| CONSERVATIVE | SPOT only | >= 0.80 | 1.5% | 2% | 2 | -5% |
+| BALANCED (default) | DYNAMIC 2x lev | >= 0.75 | 2% | 3% | 3 | -10% |
+| AGGRESSIVE | DYNAMIC 3x lev | >= 0.65 | 3% | 5% | 5 | -15% |
+
+Level presets override the base confidence threshold but are themselves further adjusted by the macro trend discounts described above.
 
 ---
 
-## Improvement Checklist (Priority Order)
+## Dynamic Confidence Adjustments (Stacking)
 
-### Implemented ✅
-- [x] **Add funding rate monitoring** — `bot/analysis/funding_rate.py` fetches rates via ccxt with 5-min caching
-- [x] **Add profit factor tracking** — `RiskManager` tracks gross P&L, fees, and net P&L
-- [x] **Validate 100-trade floor** — fee impact checked every 100 trades via `risk.check_fee_impact()`
-- [x] **Add fee/slippage accounting** — `journal.py` records `estimated_fee_usdt` and `gross_pnl_usdt` per trade
-- [x] **Add regime detector** — `bot/analysis/regime_detector.py` classifies TRENDING/RANGING/TRANSITION
-- [x] **Add diversification logic** — correlation filter in `bot/analysis/ranker.py`
-- [x] **Add volatility regime scaling** — regime-based position multiplier applied in `executor.py`
+All adjustments are additive. Applied in order:
 
-### High Priority (Remaining)
-- [x] **Add max daily trade count cap** — `max_daily_trades=200` in config, enforced by `RiskManager.can_open_trade()`
-- [x] **Track Sharpe ratio** alongside daily P&L — `RiskManager.get_sharpe_ratio()` (last 500 trades, annualised)
-- [x] **Add mean-reversion signals** — `generate_mean_reversion_signal(rsi, bb_pct)` in `regime_detector.py`; used in executor when regime is RANGING
-- [x] **Add funding confidence boost** — +0.05 confidence when funding aligns, -0.10 when strongly opposed (>0.1%/8h)
-- [x] **Add fee/slippage in backtesting** — `backtest.py` deducts 0.3% round-trip (0.1% fee + 0.05% slippage per side)
+1. **Base threshold** — from Trading Level preset (0.65–0.80)
+2. **Below min_daily_trades** — `-0.08` (floor 0.45)
+3. **Below min_concurrent_trades** — small additional reduction
+4. **BULLISH macro (BUY)** — `-0.10` (floor 0.40)
+5. **BEARISH macro (SELL)** — `-0.05` (floor 0.40)
+6. **Goal pacing below 50%** — `-0.05`
+7. **Trend-aligned floor** — `max(0.45, adjusted - 0.15)` for BULLISH/BEARISH direction-aligned trades
+8. **Regime multiplier** — applied by regime_detector (0.6–1.0x on final confidence)
+9. **Performance multiplier** — per-symbol win-rate feedback (0.90–1.10x)
 
-### Medium Priority
-- [ ] **Add stop-loss trail** — move SL to breakeven at +1% profit (like recovery_key logic)
-- [ ] **Add session awareness** — reduce trading during low-liquidity hours
-- [ ] **Add adaptive leverage** — scale leverage based on recent win rate
-
-### Low Priority
-- [ ] **Add multi-timeframe confirmation** — higher TF trend filter for entries
-- [ ] **Add news/event filter** — pause trading during major announcements
+Maximum possible discount: up to -0.28 from base threshold before regime and performance multipliers.
 
 ---
 
-## Bottom Line
+## Position Sizing and Risk
 
-The InsideTrader strategy is a **conservative trend-following + mean-reversion hybrid bot** that aligns with `strat.md`'s recommendation to adapt across regimes. All high-priority improvements from `strat.md` are now implemented:
+- **Risk per trade:** `100 / min_daily_trades` % of capital (equal share per slot)
+- **Position value:** risk% of available capital per slot
+- **FUTURES margin:** position value / leverage (e.g., 5x leverage = 20% margin of notional)
+- **Stop-loss:** percentage from entry, set by Trading Level preset
+- **Take-profit:** ATR-based multiplied by regime and macro multiplier
+- **Daily loss kill switch:** halts all new trades for the day if daily PnL falls below kill threshold
+- **Max concurrent trades:** hard limit from Trading Level or config (checked against open DB positions each loop)
 
-1. **✅ Funding rate awareness** — fetches, caches, and prefers funding-collecting side; confidence boosted/penalised by funding alignment
-2. **✅ Regime adaptation** — TRENDING/RANGING/TRANSITION detection with position sizing; RANGING regime switches to mean-reversion logic (RSI/BB signals)
-3. **✅ Correlation filter** — real Pearson correlation (30-day 1h returns) cached in Redis; correlated pairs excluded from simultaneous positions
-4. **✅ Fee accountability** — gross vs net P&L tracking; 0.3% round-trip cost modelled in backtests; fee erosion warnings at 100-trade intervals
-5. **✅ Risk caps** — max 200 trades/day cap enforced; Sharpe ratio tracked across last 500 trades
-6. **✅ Trade record enhancement** — fees, funding rate, and regime stored per trade
+---
 
-The 2x leverage, 30% rule, immediate negative-close, and 100-trade floor are sound parameters consistent with the current bot design. The bot's risk profile is conservative by futures standards, which is the right approach given the small starting capital ($92.48).
+## Pair Selection and Correlation Filtering
 
-Treat any claimed "guaranteed" high-win-rate / 4× profit-factor system with extreme skepticism — those almost always fail under real conditions. Trade only with capital you can afford to lose.
+1. Scanner identifies ~67 valid USDT spot/futures pairs on Binance
+2. Pairs are scored by ranker: `score = abs(predicted_change_pct * confidence) / max(atr_pct, 0.1)`
+3. Funding rate bonus added: `abs(funding_rate) * 1000` when trade side collects funding
+4. Correlation filter removes pairs with Pearson r > 0.95 (30-day 1h returns) to avoid over-exposure to correlated assets
+5. Remaining candidates are passed to the macro gate for directional filtering
+6. Final ranked list is iterated top-to-bottom until `max_concurrent_trades` slots are filled

@@ -37,6 +37,7 @@ class RankedPair:
     funding_rate: float = 0.0
     funding_side_to_collect: str = "NONE"
     ema21_ratio: float = 0.0
+    vol_ratio: float = 1.0
 
 
 async def _fetch_close_rows(symbols: list[str]) -> list:
@@ -184,6 +185,7 @@ def rank_pairs(
                 funding_rate=funding_rates.get(symbol, {}).get("funding_rate", 0.0) if funding_rates else 0.0,
                 funding_side_to_collect=funding_rates.get(symbol, {}).get("side_to_collect", "NONE") if funding_rates else "NONE",
                 ema21_ratio=p.get("ema21_ratio", 0.0),
+                vol_ratio=p.get("vol_ratio", 1.0),
             )
         )
 

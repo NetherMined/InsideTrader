@@ -54,6 +54,7 @@ _CORR_CACHE_TTL = 3600  # 1 hour
 _SYMBOL_COOLDOWN_SECONDS = 300  # 5 min cooldown after closing a symbol before reopening
 _MACRO_TREND_CACHE_KEY = "bot:macro_trend_cache"
 _MACRO_TREND_CACHE_TTL = 120  # 2 minutes
+_MACRO_TREND_PREV_KEY = "bot:macro_trend_prev"  # hysteresis: last raw computed trend
 
 
 async def _get_macro_trend(redis: aioredis.Redis) -> str:
@@ -88,15 +89,28 @@ async def _get_macro_trend(redis: aioredis.Redis) -> str:
     pct_up = sum(1 for c in changes if c > 0) / len(changes)
 
     if mean_chg > 0.3 and pct_up > 0.55:
-        trend = "BULLISH"
+        new_trend = "BULLISH"
     elif mean_chg < -0.3 and pct_up < 0.45:
-        trend = "BEARISH"
+        new_trend = "BEARISH"
     else:
-        trend = "NEUTRAL"
+        new_trend = "NEUTRAL"
 
-    await redis.setex(_MACRO_TREND_CACHE_KEY, _MACRO_TREND_CACHE_TTL, trend)
+    # Hysteresis: only commit a regime change after two consecutive matching reads
+    # This prevents brief price spikes from flipping strategy direction
+    prev_raw = await redis.get(_MACRO_TREND_PREV_KEY)
+    prev_trend = prev_raw.decode() if prev_raw else None
+
+    if prev_trend is None or prev_trend == new_trend:
+        trend = new_trend
+        await redis.setex(_MACRO_TREND_CACHE_KEY, _MACRO_TREND_CACHE_TTL, trend)
+    else:
+        logger.debug(f"Macro trend pending change: {prev_trend} → {new_trend} (waiting for confirmation)")
+        trend = prev_trend
+        await redis.setex(_MACRO_TREND_CACHE_KEY, _MACRO_TREND_CACHE_TTL, trend)
+
+    await redis.setex(_MACRO_TREND_PREV_KEY, _MACRO_TREND_CACHE_TTL * 3, new_trend)
     return trend
-_TRAIL_ACTIVATION_PCT = 5.0    # start trailing at 5% effective profit
+_TRAIL_ACTIVATION_PCT = 1.5    # start trailing at 1.5% effective profit
 _TRAIL_REVERSAL_PCT = 1.0      # close if price reverses 1% effective from peak
 _MIN_PROFIT_USD = 1.10         # never close a winning trade below this USD PnL (non-SL)
 _TP_TRAIL_PREFIX = "bot:tp_trail:"  # TP follower anchor per position
@@ -538,6 +552,15 @@ async def _try_open_trade(
             effective_confidence = min(1.0, effective_confidence + 0.05)
         elif abs(fr_rate) > 0.001:
             effective_confidence = max(0.0, effective_confidence - 0.10)
+
+    # Funding drag: high funding in BULLISH forced longs raises entry bar
+    # Longs pay expensive rates → require more conviction before entering
+    if forced_side == "BUY" and fr_rate > 0.0003:
+        effective_confidence = max(0.0, effective_confidence - 0.06)
+        logger.debug(
+            f"{symbol}: high funding ({fr_rate:.4%}/8h) on forced BUY "
+            f"— reducing effective_confidence by 0.06"
+        )
 
     # Require higher confidence for SELL (SHORT) — except for mean-reversion signals
     is_mr_signal = regime_result is not None and regime_result.strategy == "mean_reversion"
@@ -1091,6 +1114,9 @@ async def run_trading_engine(
                         adjusted_confidence = max(0.45, adjusted_confidence - 0.05)
                         logger.debug(f"Goal pacing: behind schedule ({goal_progress:.2f}/{goal_target:.2f}) — lowering confidence to {adjusted_confidence:.2f}")
 
+            # Hard floor: stacked discounts must never drop the threshold below 0.52
+            adjusted_confidence = max(adjusted_confidence, 0.52)
+
             macro_trend = await _get_macro_trend(redis)
             _, loop_advance_ratio = await _get_market_sentiment(redis)
             sell_threshold = adjusted_confidence
@@ -1136,9 +1162,10 @@ async def run_trading_engine(
                     # Override SELL→BUY when pair has bullish structure
                     # Conditions: price near/above EMA21, not overbought, some trend strength
                     bullish_structure = (
-                        pair.ema21_ratio >= -0.03   # price within 3% of EMA21 or above
-                        and pair.rsi < 72           # not overbought
-                        and pair.adx > 10           # some momentum
+                        pair.ema21_ratio >= -0.015  # price within 1.5% of EMA21 or above
+                        and pair.rsi < 65           # not approaching overbought
+                        and pair.adx >= 18          # meaningful directional strength
+                        and pair.vol_ratio >= 1.0   # volume above 20-period SMA (participation)
                     )
                     if bullish_structure:
                         if pair.bb_pct <= 0.35 and pair.rsi <= 55:
