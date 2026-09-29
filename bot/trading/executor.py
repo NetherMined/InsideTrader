@@ -526,6 +526,22 @@ async def _try_open_trade(
             )
             return False
 
+    # Dual-bot gate: 15m researcher may block a new entry. Never opens a trade itself.
+    try:
+        from bot.manager.gate import should_enter
+        decision = await should_enter(redis, symbol, side)
+        if not decision.ok:
+            logger.debug(f"{symbol}: researcher gate skip — {decision.reason}")
+            return False
+        if decision.packet:
+            # stash on pair for journal extra
+            try:
+                pair.research_packet = decision.packet  # type: ignore[attr-defined]
+            except Exception:
+                pass
+    except Exception as gate_exc:
+        logger.warning(f"{symbol}: researcher gate error ({gate_exc}) — allowing 1h path")
+
     # Funding rate awareness: prefer the side that collects funding
     funding_signal = None
     if funding_rates and symbol in funding_rates:
@@ -726,6 +742,15 @@ async def _try_open_trade(
         "regime": regime_result.regime if regime_result else "UNKNOWN",
         "funding_rate": round(pair.funding_rate, 6) if pair.funding_rate else 0.0,
     }
+    pkt = getattr(pair, "research_packet", None)
+    if isinstance(pkt, dict):
+        entry_indicators["research"] = {
+            "pred_side": pkt.get("pred_1h_close_side"),
+            "confidence": pkt.get("confidence"),
+            "arm": pkt.get("arm"),
+            "hour_start": pkt.get("hour_start"),
+            "setup": pkt.get("setup"),
+        }
     await open_position(
         symbol=symbol, side=side, mode=mode,
         entry_price=fill_price, quantity=quantity,

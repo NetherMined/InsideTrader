@@ -66,6 +66,7 @@ class Trade(Base):
     opened_at = Column(DateTime(timezone=True), server_default=func.now())
     closed_at = Column(DateTime(timezone=True))
     extra = Column(JSON)
+    archived = Column(Boolean, default=False)
 
 
 class Position(Base):
@@ -125,4 +126,63 @@ class BacktestResult(Base):
     max_drawdown = Column(Float)
     total_return_pct = Column(Float)
     params = Column(JSON)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ResearchPacket(Base):
+    __tablename__ = "research_packets"
+    __table_args__ = (
+        UniqueConstraint("symbol", "hour_start", "packet_time", name="uq_research_packet"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(30), nullable=False, index=True)
+    hour_start = Column(DateTime(timezone=True), nullable=False, index=True)
+    packet_time = Column(DateTime(timezone=True), nullable=False)
+    pred_side = Column(String(8), nullable=False)
+    pred_low = Column(Float)
+    pred_high = Column(Float)
+    invalidation = Column(Float)
+    confidence = Column(Float, nullable=False)
+    setup = Column(Text)
+    features = Column(JSON)
+    arm = Column(Boolean, default=False)
+    raw = Column(JSON)
+
+
+class HourReview(Base):
+    __tablename__ = "hour_reviews"
+    __table_args__ = (
+        UniqueConstraint("symbol", "hour_start", name="uq_hour_review"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(30), nullable=False, index=True)
+    hour_start = Column(DateTime(timezone=True), nullable=False, index=True)
+    side_ok = Column(Boolean)
+    range_ok = Column(Boolean)
+    invalidation_hit = Column(Boolean)
+    manager_action = Column(String(16))
+    rule_version = Column(Integer)
+    followed_advice = Column(Boolean)
+    labels = Column(JSON)
+    usefulness = Column(String(16))
+    patch = Column(JSON)
+    actual = Column(JSON)
+
+
+class RulePatch(Base):
+    __tablename__ = "rule_patches"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    from_version = Column(Integer, nullable=False)
+    to_version = Column(Integer)
+    change = Column(Text, nullable=False)
+    because = Column(Text)
+    scope = Column(String(80))
+    labels = Column(JSON)
+    status = Column(String(16), default="pending")
+    expires_at = Column(DateTime(timezone=True))
+    decided_at = Column(DateTime(timezone=True))
+    decided_by = Column(String(16))
     created_at = Column(DateTime(timezone=True), server_default=func.now())

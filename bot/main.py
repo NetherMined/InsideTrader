@@ -26,6 +26,7 @@ from bot.data.fetcher import fetch_historical, fetch_recent
 from bot.data.stream import poll_prices, check_redis
 from bot.analysis.trainer import run_analysis, force_retrain_models
 from bot.trading.executor import run_trading_engine
+from bot.research.loop import run_researcher_loop
 
 LOG_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
@@ -106,7 +107,9 @@ async def hourly_refresh(
             markets = await scan_markets()
             await save_scanned_markets(markets)
             refreshed = await get_top_pairs(100)
-            await fetch_recent(refreshed)
+            await fetch_recent(refreshed, settings.analysis_timeframe)
+            if settings.research_enabled:
+                await fetch_recent(refreshed, settings.research_timeframe)
             ranked = await run_analysis(refreshed)
             ranked_store["pairs"] = ranked
             logger.info(f"Hourly refresh complete — {len(ranked)} ranked pairs (engine updated)")
@@ -162,8 +165,11 @@ async def main() -> None:
     pairs = settings.pairs_list or top_pairs
     logger.info(f"Using {len(pairs)} pairs")
 
-    logger.info("Fetching historical OHLCV data...")
-    await fetch_historical(pairs)
+    logger.info("Fetching historical OHLCV data (1h manager)...")
+    await fetch_historical(pairs, settings.analysis_timeframe)
+    if settings.research_enabled:
+        logger.info(f"Fetching {settings.research_timeframe} candles for researcher (capped lookback)...")
+        await fetch_historical(pairs, settings.research_timeframe)
 
     logger.info("Running analysis engine...")
     ranked = await run_analysis(pairs)
@@ -197,6 +203,7 @@ async def main() -> None:
         asyncio.create_task(_guarded("price_stream", poll_prices(pairs, stop_event))),
         asyncio.create_task(_guarded("hourly_refresh", hourly_refresh(pairs, redis, stop_event, ranked_store))),
         asyncio.create_task(_guarded("periodic_retrain", periodic_retrain(pairs, stop_event))),
+        asyncio.create_task(_guarded("researcher", run_researcher_loop(ranked_store, redis, stop_event))),
     ]
     try:
         await asyncio.gather(*tasks)

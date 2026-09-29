@@ -61,6 +61,8 @@ async def init_db() -> None:
         "CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades (symbol, status)",
         "CREATE INDEX IF NOT EXISTS idx_trades_opened_at ON trades (opened_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf_time ON candles (symbol, timeframe, open_time DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_research_packets_symbol_hour ON research_packets (symbol, hour_start DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_hour_reviews_symbol_hour ON hour_reviews (symbol, hour_start DESC)",
     ]
     async with engine.begin() as conn:
         for idx_sql in _indexes:

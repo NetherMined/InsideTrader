@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     trading_mode: str = "DYNAMIC"
     trading_pairs: str = "AUTO"
-    analysis_timeframe: str = "15m"
+    analysis_timeframe: str = "1h"
     futures_leverage: int = 5
     starting_capital_usdt: float = 100.0
 
@@ -43,6 +43,16 @@ class Settings(BaseSettings):
     taker_fee_rate: float = 0.0004
 
     paper_trading_mode: bool = True
+    research_enabled: bool = True
+    research_timeframe: str = "15m"
+    research_min_confidence: float = 0.55
+    require_15m_confirm: bool = True
+    allow_1h_only_if_research_stale: bool = True
+    research_stale_minutes: int = 20
+    patch_window_hours: int = 10
+    patch_min_label_count: int = 4
+    patch_auto_accept_tighten_only: bool = True
+    patch_expiry_hours: int = 48
     live_trading_enabled: bool = False
 
     postgres_host: str = "localhost"
