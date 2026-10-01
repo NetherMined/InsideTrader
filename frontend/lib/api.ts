@@ -1,7 +1,7 @@
 import type {
   Health, Market, Prediction, Position, Trade,
   BotStatus, Backtest, LivePrice, Candle,
-  TradeLimits, Goal, PnlPeriodStats, ModeBreakdown,
+  TradeLimits, PnlPeriodStats, ModeBreakdown,
   AccountBalances, LiveMode, MarketSentiment, StartupStatus,
 } from './types';
 
@@ -71,10 +71,6 @@ export const api = {
   getTradeLimits: () => get<TradeLimits>('/api/v1/settings/trade-limits'),
   setTradeLimits: (updates: Partial<TradeLimits>) =>
     postJson<TradeLimits>('/api/v1/settings/trade-limits', updates),
-  getGoal: () => get<Goal>('/api/v1/settings/goal'),
-  setGoal: (amount_usdt: number) => postJson<Goal>('/api/v1/settings/goal', { amount_usdt }),
-  getGoalEnabled: () => get<{ enabled: boolean }>('/api/v1/settings/goal-enabled'),
-  setGoalEnabled: (enabled: boolean) => postJson<{ enabled: boolean }>('/api/v1/settings/goal-enabled', { enabled }),
   getCapital: () => get<{ capital_usdt: number; starting_capital_usdt: number }>('/api/v1/settings/capital'),
   setCapital: (capital_usdt: number) =>
     postJson<{ ok: boolean; capital_usdt: number }>('/api/v1/settings/capital', { capital_usdt }),

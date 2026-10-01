@@ -28,8 +28,12 @@ from bot.analysis.ranker import RankedPair, filter_correlated_pairs, fetch_pair_
 from bot.analysis.mode_classifier import classify_mode
 from bot.analysis.regime_detector import detect_regime, RegimeResult
 from bot.analysis.funding_rate import fetch_funding_rates, get_funding_signal
+from bot.analysis.structure import (
+    classify_structure, detect_zones, calculate_zone_sl, calculate_zone_tp,
+    is_near_zone, compute_rr_ratio, StructureState, Zone,
+)
 from bot.trading.risk import RiskManager, COMMAND_KEY
-from bot.trading.sizing import calculate_position_size, calculate_sl_tp_prices
+from bot.trading.sizing import calculate_position_size, calculate_sl_tp_prices, calculate_trade_heat
 from bot.trading.journal import (
     open_position, close_position, update_position_price, get_open_positions, update_position_tp, get_pnl_summary,
 )
@@ -54,6 +58,40 @@ _CORR_CACHE_TTL = 3600  # 1 hour
 _SYMBOL_COOLDOWN_SECONDS = 300  # 5 min cooldown after closing a symbol before reopening
 _MACRO_TREND_CACHE_KEY = "bot:macro_trend_cache"
 _MACRO_TREND_CACHE_TTL = 120  # 2 minutes
+_STRUCTURE_CACHE_PREFIX = "structure:"
+
+
+async def _load_structure_cached(
+    redis: aioredis.Redis, symbol: str
+) -> tuple[StructureState | None, list[Zone]]:
+    """Load structure state + zones from Redis cache, or compute from 1h candles."""
+    cache_key = f"{_STRUCTURE_CACHE_PREFIX}{symbol}"
+    cached = await redis.get(cache_key)
+    if cached:
+        try:
+            data = json.loads(cached)
+            state = StructureState.from_dict(data["state"])
+            zones = [Zone.from_dict(z) for z in data.get("zones", [])]
+            return state, zones
+        except Exception:
+            pass
+
+    try:
+        from bot.research.packets import load_candles
+        df = await load_candles(symbol, "1h", limit=200)
+        if df is None or len(df) < 30:
+            return None, []
+        state = classify_structure(df, lookback=settings.swing_lookback)
+        zones = detect_zones(df, state)
+        payload = json.dumps({
+            "state": state.to_dict(),
+            "zones": [z.to_dict() for z in zones],
+        })
+        await redis.setex(cache_key, settings.structure_cache_ttl, payload)
+        return state, zones
+    except Exception as e:
+        logger.debug(f"{symbol}: structure load failed ({e})")
+        return None, []
 
 
 async def _get_macro_trend(redis: aioredis.Redis) -> str:
@@ -290,8 +328,16 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         )
         regime_val = pos.get("regime", "")
         is_trending = str(regime_val).upper() in ("TRENDING", "TRANSITION")
+        # Zone-based SL trades skip break-even — the zone thesis must play out
+        _entry_ind = pos.get("entry_indicators") or {}
+        if isinstance(_entry_ind, str):
+            try:
+                _entry_ind = json.loads(_entry_ind)
+            except Exception:
+                _entry_ind = {}
+        _zone_sl = _entry_ind.get("zone_based_sl", False)
         if (not in_recovery_raw and effective_pnl_pct <= -1.5 and be_eligible
-                and not price_moving_toward_profit and not is_trending):
+                and not price_moving_toward_profit and not is_trending and not _zone_sl):
             new_tp = entry_price
             await update_position_tp(pos_id, new_tp)
             await redis.sadd(recovery_key, str(pos_id))
@@ -483,27 +529,6 @@ async def _try_open_trade(
         except Exception as e:
             logger.debug(f"{symbol}: regime detection failed ({e})")
 
-    # Phase 2: Mean-reversion signal override when in RANGING regime
-    if regime_result is not None and regime_result.strategy == "mean_reversion":
-        from bot.analysis.regime_detector import generate_mean_reversion_signal
-        mr_signal = generate_mean_reversion_signal(pair.rsi, pair.bb_pct)
-        if mr_signal["side"] != "NONE" and mr_signal["strength"] >= 0.5:
-            side = mr_signal["side"]
-            logger.info(f"{symbol}: mean-reversion override → {side} ({mr_signal['reason']})")
-        else:
-            logger.debug(f"{symbol}: RANGING regime but no MR signal (rsi={pair.rsi:.1f} bb_pct={pair.bb_pct:.2f}), using ML direction")
-
-    # Extreme funding arb: override ML direction to collect funding when rate >= 0.05%/8h
-    from bot.analysis.funding_rate import is_extreme_funding
-    if pair.funding_rate and is_extreme_funding(pair.funding_rate):
-        collecting_side = pair.funding_side_to_collect
-        if collecting_side and collecting_side != "NONE" and collecting_side != side:
-            logger.info(
-                f"{symbol}: extreme funding ({pair.funding_rate:.4%}/8h) "
-                f"→ overriding {side} to {collecting_side} for arb"
-            )
-            side = collecting_side
-
     # Apply regime confidence multiplier
     effective_confidence = pair.confidence
     if regime_result is not None:
@@ -526,21 +551,39 @@ async def _try_open_trade(
             )
             return False
 
-    # Dual-bot gate: 15m researcher may block a new entry. Never opens a trade itself.
+    # Resolve effective mode early — needed by the alignment gate
+    force_mode_raw = await redis.get(_FORCE_TRADE_MODE_KEY)
+    force_mode = force_mode_raw if force_mode_raw in ("SPOT", "FUTURES", "DYNAMIC") else None
+    effective_mode_param = force_mode if force_mode else params["mode"]
+
+    # Load structure early so both the gate and the entry filter can use it
+    struct_state, zones = await _load_structure_cached(redis, symbol)
+
+    # Dual-bot alignment gate: bot_prediction must match market_trend.
+    regime_name = regime_result.regime if regime_result else "UNKNOWN"
     try:
         from bot.manager.gate import should_enter
-        decision = await should_enter(redis, symbol, side)
+        decision = await should_enter(
+            redis, symbol, side,
+            predicted_change_pct=pair.predicted_change_pct,
+            confidence=pair.confidence,
+            ema21=getattr(pair, "ema21", 0.0),
+            ema50=getattr(pair, "ema50", 0.0),
+            adx=pair.adx,
+            regime=regime_name,
+            mode=effective_mode_param,
+            structure=struct_state,
+        )
         if not decision.ok:
-            logger.debug(f"{symbol}: researcher gate skip — {decision.reason}")
+            logger.debug(f"{symbol}: alignment gate skip — {decision.reason}")
             return False
         if decision.packet:
-            # stash on pair for journal extra
             try:
                 pair.research_packet = decision.packet  # type: ignore[attr-defined]
             except Exception:
                 pass
     except Exception as gate_exc:
-        logger.warning(f"{symbol}: researcher gate error ({gate_exc}) — allowing 1h path")
+        logger.warning(f"{symbol}: alignment gate error ({gate_exc}) — allowing 1h path")
 
     # Funding rate awareness: prefer the side that collects funding
     funding_signal = None
@@ -556,11 +599,6 @@ async def _try_open_trade(
 
     # Read market sentiment once — used for both mode selection and direction filter
     market_sentiment, advance_ratio = await _get_market_sentiment(redis)
-
-    # Force trade mode override (SPOT / FUTURES / DYNAMIC)
-    force_mode_raw = await redis.get(_FORCE_TRADE_MODE_KEY)
-    force_mode = force_mode_raw if force_mode_raw in ("SPOT", "FUTURES", "DYNAMIC") else None
-    effective_mode_param = force_mode if force_mode else params["mode"]
 
     # Gate FUTURES mode if funding is unfavorable and confidence is low
     if effective_mode_param == "FUTURES":
@@ -600,7 +638,25 @@ async def _try_open_trade(
         logger.debug(f"Skip {symbol}: SHORT not supported in SPOT mode")
         return False
 
-    can_open, reason = await risk.can_open_trade(symbol, open_symbols, params["max_concurrent_trades"])
+    # Compute heat for this trade
+    positions_all = await get_open_positions()
+    open_heat_usdt = 0.0
+    symbol_heat_usdt = 0.0
+    lev = params["futures_leverage"]
+    for p in positions_all:
+        p_notional = float(p["quantity"]) * float(p["entry_price"])
+        p_lev = int(p.get("leverage") or 1)
+        p_heat = p_notional / p_lev if p.get("mode") == "FUTURES" else p_notional
+        open_heat_usdt += p_heat
+        if p["symbol"] == symbol:
+            symbol_heat_usdt += p_heat
+
+    trade_heat = calculate_trade_heat(capital, open_heat_usdt, symbol_heat_usdt, params)
+
+    can_open, reason = await risk.can_open_trade(
+        symbol, open_symbols, params, capital, open_heat_usdt,
+        symbol_heat_usdt=symbol_heat_usdt, trade_heat_usdt=trade_heat,
+    )
     if not can_open:
         logger.debug(f"Skip {symbol}: {reason}")
         return False
@@ -622,63 +678,62 @@ async def _try_open_trade(
     if not current_price or current_price <= 0:
         return False
 
-    existing_exposure = sum(
-        float(p["quantity"]) * float(p["entry_price"])
-        for p in await get_open_positions()
-        if p["symbol"] == symbol
-    )
+    # Phase 3: Structure awareness — penalise counter-trend but don't hard-block
+    # (hard-blocking starves the bot when ML systematically predicts against trend)
+    if struct_state and struct_state.confirmed:
+        if (side == "BUY" and struct_state.trend == "DOWN") or (side == "SELL" and struct_state.trend == "UP"):
+            effective_confidence *= 0.75  # penalise counter-trend, let high-conviction through
+            logger.debug(f"{symbol}: counter-trend {side} vs confirmed {struct_state.trend} — confidence penalised to {effective_confidence:.2f}")
 
-    lev = params["futures_leverage"]
-    _max_conc = params["max_concurrent_trades"]
-    # 40% of capital split equally across max concurrent trades.
-    # Both SPOT and FUTURES use the same capital share per slot.
-    # FUTURES: risk_pct = margin % (notional = margin * lev)
-    # SPOT: risk_pct = full notional % (capital locked = notional, no leverage)
-    # consumes the same effective dollar exposure as a FUTURES trade at the same slot.
-    base_risk_pct = 40.0 / _max_conc if _max_conc > 0 else settings.max_risk_per_trade_percent
-    risk_pct = base_risk_pct
-
-    # Apply regime-based position size multiplier
-    regime_mult = 1.0
-    if regime_result is not None:
-        try:
-            from bot.analysis.regime_detector import get_regime_based_position_multiplier
-            regime_mult = get_regime_based_position_multiplier(regime_result)
-            regime_name = getattr(regime_result, "regime", regime_result.get("regime") if isinstance(regime_result, dict) else "?")
-            if regime_mult < 1.0:
-                logger.debug(f"{symbol}: regime {regime_name} — position size reduced to {regime_mult}")
-        except Exception as e:
-            logger.warning(f"{symbol}: regime multiplier failed ({e}), using 1.0")
-            regime_mult = 1.0
-
-    # Adjust risk_pct by regime multiplier
-    adjusted_risk_pct = risk_pct * regime_mult
     quantity, notional = calculate_position_size(
-        capital, current_price, mode, existing_exposure, leverage=lev, max_risk_per_trade_pct=adjusted_risk_pct
+        capital, current_price, mode, trade_heat, leverage=lev,
     )
     if quantity <= 0:
         logger.debug(f"Skip {symbol}: position size too small")
         return False
 
-    # In ranging markets use a tighter TP (0.6× ATR) for faster grid-style cycling
     atr_for_tp = pair.atr_pct
-    if regime_result is not None and regime_result.regime == "RANGING":
-        atr_for_tp = pair.atr_pct * 0.6
+    atr_abs = pair.atr_pct / 100 * current_price if pair.atr_pct > 0 else 0
 
-    stop_loss, take_profit = calculate_sl_tp_prices(
-        current_price, mode,
-        side=side,
-        sl_pct=params["stop_loss_percent"],
-        tp_pct=params["take_profit_percent"],
-        leverage=lev,
-        atr_pct=atr_for_tp,
-    )
+    # Phase 2: Zone-based SL/TP with R:R gate
+    zone_based_sl = False
+    if zones and atr_abs > 0:
+        stop_loss, zone_based_sl = calculate_zone_sl(
+            current_price, side, zones, atr_abs,
+            fallback_sl_pct=params["stop_loss_percent"],
+            max_sl_pct=settings.zone_sl_max_pct,
+        )
+        take_profit = calculate_zone_tp(
+            current_price, side, zones, atr_for_tp,
+            fallback_tp_pct=params["take_profit_percent"],
+        )
+    else:
+        stop_loss, take_profit = calculate_sl_tp_prices(
+            current_price, mode,
+            side=side,
+            sl_pct=params["stop_loss_percent"],
+            tp_pct=params["take_profit_percent"],
+            leverage=lev,
+            atr_pct=atr_for_tp,
+        )
+
+    # R:R gate — hard 2.5:1 minimum for zone-based entries only
+    # Fixed SL/TP trades skip the R:R gate (they use the old proven ratios)
+    rr = compute_rr_ratio(current_price, stop_loss, take_profit)
+    if zone_based_sl and rr < settings.min_rr_ratio:
+        logger.debug(
+            f"{symbol}: skip {side} — zone R:R {rr:.2f} < {settings.min_rr_ratio} "
+            f"(SL=${stop_loss:.4f} TP=${take_profit:.4f})"
+        )
+        return False
+
     leverage = lev if mode == "FUTURES" else 1
 
     logger.info(
         f"Opening {'[PAPER] ' if paper else ''}{mode} {side} trade: {symbol} "
         f"@ ${current_price:.4f} | qty={quantity:.6f} | "
-        f"SL=${stop_loss:.4f} TP=${take_profit:.4f} | "
+        f"SL=${stop_loss:.4f} TP=${take_profit:.4f} | R:R={rr:.1f}:1 | "
+        f"struct={'zone' if zone_based_sl else 'fixed'} | "
         f"conf={pair.confidence:.2f} pred={pair.predicted_change_pct:+.2f}%"
     )
 
@@ -741,6 +796,10 @@ async def _try_open_trade(
         "predicted_change_pct": round(pair.predicted_change_pct, 4),
         "regime": regime_result.regime if regime_result else "UNKNOWN",
         "funding_rate": round(pair.funding_rate, 6) if pair.funding_rate else 0.0,
+        "zone_based_sl": zone_based_sl,
+        "rr_ratio": rr,
+        "structure_trend": struct_state.trend if struct_state else "UNKNOWN",
+        "structure_confirmed": struct_state.confirmed if struct_state else False,
     }
     pkt = getattr(pair, "research_packet", None)
     if isinstance(pkt, dict):
@@ -775,8 +834,18 @@ async def _maybe_switch_trade(
     funding_rates: dict[str, dict] | None = None,
     regime_result: RegimeResult | None = None,
 ) -> None:
-    """Close the worst losing position if a significantly better pair is available."""
+    """Close the worst losing position only when all seats are full and free heat is 0."""
     if len(positions) < params["max_concurrent_trades"]:
+        return
+
+    # Only switch when heat is fully consumed (need a seat)
+    heat_limit = capital * params["heat_limit_pct"] / 100
+    open_heat = 0.0
+    for p in positions:
+        p_notional = float(p["quantity"]) * float(p["entry_price"])
+        p_lev = int(p.get("leverage") or 1)
+        open_heat += p_notional / p_lev if p.get("mode") == "FUTURES" else p_notional
+    if open_heat < heat_limit * 0.95:
         return
 
     open_symbols = {p["symbol"] for p in positions}
@@ -792,7 +861,6 @@ async def _maybe_switch_trade(
     if best_unopen is None:
         return
 
-    # Require very high confidence on the new pair to justify disrupting an existing position
     if best_unopen.confidence < 0.92:
         return
 
@@ -800,7 +868,6 @@ async def _maybe_switch_trade(
     if float(worst_pos["unrealized_pnl"]) >= 0:
         return
 
-    # Only switch if the loss is substantial (>= 1.5% of notional) — avoids churning on small fluctuations
     worst_notional = float(worst_pos["entry_price"]) * float(worst_pos["quantity"])
     worst_loss_pct = abs(float(worst_pos["unrealized_pnl"])) / max(worst_notional, 1.0) * 100
     if worst_loss_pct < 1.5:
@@ -949,11 +1016,13 @@ async def run_trading_engine(
     mode_label = "PAPER TRADING" if mode_flags["paper"] else "LIVE TRADING"
     logger.info(f"Trading engine started — {mode_label}")
     await telegram.notify_bot_started(mode_flags["paper"], mode_flags["use_testnet"])
+    params = await risk.get_effective_params()
+    await risk.write_locked_defaults(params["mode"])
     logger.info(
-        f"Config: target={settings.daily_target_percent}% | "
-        f"risk_per_trade={settings.max_risk_per_trade_percent}% | "
-        f"min_daily_trades={settings.min_daily_trades} | "
-        f"min_concurrent={settings.min_concurrent_trades}"
+        f"Config: heat={params['heat_limit_pct']}% | "
+        f"confidence={params['confidence_threshold']} | "
+        f"max_sim={params['max_concurrent_trades']} | "
+        f"leverage={params['futures_leverage']}"
     )
 
     while not stop_event.is_set():
@@ -1069,40 +1138,17 @@ async def run_trading_engine(
             positions = await get_open_positions()
             open_symbols = [p["symbol"] for p in positions]
 
-            min_concurrent = params.get("min_concurrent_trades", 0)
-            min_daily = params.get("min_daily_trades", 0)
-
             adjusted_confidence = confidence_threshold
-            if min_concurrent > 0 and open_count < min_concurrent:
-                adjusted_confidence = max(0.45, confidence_threshold - 0.10)
-                logger.debug(f"Below min concurrent ({open_count}/{min_concurrent}) — lowering confidence to {adjusted_confidence:.2f}")
-            elif min_daily > 0 and daily_trade_count < min_daily:
-                adjusted_confidence = max(0.45, confidence_threshold - 0.08)
-                logger.debug(f"Below min daily trades ({daily_trade_count}/{min_daily}) — lowering confidence to {adjusted_confidence:.2f}")
+            sell_threshold = confidence_threshold
 
-            goal_enabled = await risk.get_goal_enabled()
-            if goal_enabled:
-                goal_data = await risk.get_goal()
-                if goal_data and goal_data.get("amount_usdt", 0) > 0:
-                    goal_progress = await risk.get_daily_pnl_usdt()
-                    goal_target = float(goal_data["amount_usdt"])
-                    if goal_progress < goal_target * 0.5:
-                        adjusted_confidence = max(0.45, adjusted_confidence - 0.05)
-                        logger.debug(f"Goal pacing: behind schedule ({goal_progress:.2f}/{goal_target:.2f}) — lowering confidence to {adjusted_confidence:.2f}")
-
-            macro_trend = await _get_macro_trend(redis)
-            sell_threshold = adjusted_confidence
-            if macro_trend == "BULLISH":
-                # Bullish market: suppress shorts, allow longs more easily
-                sell_threshold = min(0.90, adjusted_confidence + 0.20)
-                adjusted_confidence = max(0.40, adjusted_confidence - 0.05)
-                logger.debug(f"Macro trend BULLISH — BUY floor={adjusted_confidence:.2f}, SELL floor={sell_threshold:.2f}")
-            elif macro_trend == "BEARISH":
-                # Bearish market: allow shorts more easily
-                sell_threshold = max(0.40, adjusted_confidence - 0.05)
-                logger.debug(f"Macro trend BEARISH — SELL floor={sell_threshold:.2f}")
-            else:
-                logger.debug(f"Macro trend NEUTRAL — floor={adjusted_confidence:.2f}")
+            # Publish heat metrics for dashboard
+            positions_for_heat = await get_open_positions()
+            open_heat_usdt = 0.0
+            for p in positions_for_heat:
+                p_notional = float(p["quantity"]) * float(p["entry_price"])
+                p_lev = int(p.get("leverage") or 1)
+                open_heat_usdt += p_notional / p_lev if p.get("mode") == "FUTURES" else p_notional
+            await risk.publish_heat(capital, open_heat_usdt, params)
 
             pairs_list = ranked_store.get("pairs", [])
             # Annotate pairs with funding rate info
@@ -1118,7 +1164,7 @@ async def run_trading_engine(
 
             ranked_filtered = filter_correlated_pairs(
                 pairs_list,
-                max_concurrent=params["max_concurrent_trades"] * 3,
+                max_concurrent=max(params["max_concurrent_trades"] * 5, 20),
                 correlation_matrix=correlation_matrix or None,
             )
 

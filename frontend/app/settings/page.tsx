@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { useCurrency } from '@/lib/currency';
-import type { Health, TradeLimits, Goal, AccountBalances, LiveMode } from '@/lib/types';
+import type { Health, TradeLimits, AccountBalances, LiveMode } from '@/lib/types';
 import { NotificationPermissionButton, NotificationFilterSelector } from '@/components/Toast';
 
 function StatusDot({ ok }: { ok: boolean }) {
@@ -129,19 +129,18 @@ function ModeToggle({
 }
 
 const DEFAULT_LIMITS: TradeLimits = {
-  max_concurrent_trades: 3,
-  confidence_threshold: 0.75,
+  trading_mode: 'DYNAMIC',
+  max_concurrent_trades: 4,
+  max_daily_trades: 16,
+  confidence_threshold: 0.70,
   stop_loss_percent: 2.0,
   take_profit_percent: 3.0,
   daily_loss_limit_percent: 10.0,
   futures_leverage: 2,
-  negative_trade_timeout_minutes: 30,
-  trading_mode: 'DYNAMIC',
-  min_daily_trades: 0,
-  min_concurrent_trades: 0,
-  max_daily_trades: 200,
-  force_trade_mode: 'DYNAMIC',
-  disable_futures_buy: true,
+  negative_trade_timeout_minutes: 60,
+  heat_limit_pct: 40,
+  open_heat_usdt: 0,
+  free_heat_usdt: 0,
 };
 
 export default function SettingsPage() {
@@ -151,9 +150,6 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [goal, setGoal] = useState<Goal>({ amount_usdt: 0, period_hours: 168, max_allowed_usdt: 0 });
-  const [goalInput, setGoalInput] = useState('');
-  const [savingGoal, setSavingGoal] = useState(false);
 
   const [capital, setCapital] = useState<number | null>(null);
   const [capitalInput, setCapitalInput] = useState('');
@@ -189,19 +185,12 @@ export default function SettingsPage() {
     Promise.all([
       api.health().catch(() => null),
       api.getTradeLimits().catch(() => null),
-      api.getGoal().catch(() => null),
       api.getCapital().catch(() => null),
       api.botStatus().catch(() => null),
       api.getLiveMode().catch(() => null),
-    ]).then(([h, tl, g, c, bs, lm]) => {
+    ]).then(([h, tl, c, bs, lm]) => {
       if (h) setHealth(h);
       if (tl) setLimits(tl);
-      if (g) {
-        setGoal(g);
-        if (g.amount_usdt > 0) {
-          setGoalInput(currency === 'ZAR' && zarRate ? (g.amount_usdt * zarRate).toFixed(0) : g.amount_usdt.toFixed(2));
-        }
-      }
       if (c) {
         setCapital(c.capital_usdt);
         setCapitalInput(c.capital_usdt.toFixed(2));
@@ -236,27 +225,6 @@ export default function SettingsPage() {
       showToast('Failed to save settings');
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function handleSaveGoal() {
-    const raw = parseFloat(goalInput.replace(',', '.'));
-    if (isNaN(raw) || raw < 0) { showToast('Enter a valid goal amount'); return; }
-    const amount_usdt = currency === 'ZAR' && zarRate ? raw / zarRate : raw;
-    setSavingGoal(true);
-    try {
-      if (goal.max_allowed_usdt > 0 && amount_usdt > goal.max_allowed_usdt) {
-        showToast(`Max realistic goal is ${display(goal.max_allowed_usdt)}`);
-        setSavingGoal(false);
-        return;
-      }
-      const saved = await api.setGoal(amount_usdt);
-      setGoal(saved);
-      showToast('Goal saved');
-    } catch {
-      showToast('Failed to save goal');
-    } finally {
-      setSavingGoal(false);
     }
   }
 
@@ -361,14 +329,6 @@ export default function SettingsPage() {
 
   const capitalChanged = capital !== null && parseFloat(capitalInput || '0') !== capital;
   const isLive = liveMode ? !liveMode.paper_trading_mode && liveMode.live_trading_enabled : false;
-
-  const cap = capital ?? 100;
-  const maxSensibleConcurrent = Math.min(50, Math.max(1, Math.floor(cap / 11)));
-  const concurrentSuggestions = Array.from(new Set([1, 3, 5, 10, maxSensibleConcurrent])).filter(v => v >= 1 && v <= 50);
-  const minConcurrentSuggestions = Array.from(new Set([0, 1, 2, 3, Math.min(5, Math.floor(maxSensibleConcurrent / 2))])).filter(v => v >= 0 && v <= 50);
-  const minDailySuggestions = [0, 10, 20, 50, 100];
-  const stopLossSuggestions = [0.5, 1, 1.5, 2, 3];
-  const takeProfitSuggestions = [1, 2, 3, 5, 7];
 
   return (
     <div className="p-6 space-y-6 max-w-2xl">
@@ -625,193 +585,34 @@ export default function SettingsPage() {
       )}
 
       <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
-        <div className="text-sm font-semibold mb-1">Trading Parameters</div>
+        <div className="text-sm font-semibold mb-1">Trading Mode</div>
         <p className="text-xs mb-4" style={{ color: '#848e9c' }}>
-          Changes take effect on the next 60-second bot cycle — no restart required.
+          The only strategy control. All other parameters are locked by the dual-bot system.
         </p>
         <ModeToggle
           value={limits.trading_mode}
           onChange={(v) => handleLimitChange('trading_mode', v)}
           disabled={saving}
         />
-        <div className="flex items-center justify-between py-2" style={{ borderBottom: '1px solid #1a1a1a' }}>
-          <div>
-            <span className="text-xs" style={{ color: '#848e9c' }}>Futures BUY Gate</span>
-            <div className="text-xs mt-0.5" style={{ color: '#555', fontSize: 10 }}>
-              Auto-managed by ML — bot gates futures longs if win rate falls below 45%
-            </div>
-          </div>
-          <span
-            className="px-3 py-1 rounded text-xs font-semibold"
-            style={{
-              background: limits.disable_futures_buy ? 'rgba(246,70,93,0.12)' : 'rgba(14,203,129,0.1)',
-              color: limits.disable_futures_buy ? '#f6465d' : '#0ecb81',
-              border: `1px solid ${limits.disable_futures_buy ? 'rgba(246,70,93,0.3)' : 'rgba(14,203,129,0.25)'}`,
-            }}
-          >
-            {limits.disable_futures_buy ? 'Gated by ML' : 'Allowed'}
-          </span>
+        <div className="mt-3 text-xs p-3 rounded-lg" style={{ background: 'rgba(240,185,11,0.08)', color: '#848e9c' }}>
+          Heat cap: {limits.heat_limit_pct}% of equity
+          &nbsp;&middot;&nbsp;Max {limits.max_concurrent_trades} simultaneous
+          &nbsp;&middot;&nbsp;Max {limits.max_daily_trades}/day
+          &nbsp;&middot;&nbsp;Leverage: {limits.futures_leverage}x
         </div>
-        <Stepper
-          label="Max concurrent trades"
-          value={limits.max_concurrent_trades}
-          min={1} max={50}
-          onChange={(v) => handleLimitChange('max_concurrent_trades', v)}
-          disabled={saving}
-          suggestions={concurrentSuggestions}
-        />
-        <Stepper
-          label="Confidence threshold"
-          value={limits.confidence_threshold}
-          min={0.40} max={0.95} step={0.05}
-          suffix=""
-          onChange={(v) => handleLimitChange('confidence_threshold', v)}
-          disabled={saving}
-        />
-        <Stepper
-          label="Stop loss"
-          value={limits.stop_loss_percent}
-          min={0.5} max={10} step={0.5}
-          suffix="%"
-          onChange={(v) => handleLimitChange('stop_loss_percent', v)}
-          disabled={saving}
-          suggestions={stopLossSuggestions}
-        />
-        <Stepper
-          label="Take profit"
-          value={limits.take_profit_percent}
-          min={0.5} max={15} step={0.5}
-          suffix="%"
-          onChange={(v) => handleLimitChange('take_profit_percent', v)}
-          disabled={saving}
-          suggestions={takeProfitSuggestions}
-        />
-        <Stepper
-          label="Kill switch (daily loss)"
-          value={limits.daily_loss_limit_percent}
-          min={2} max={25} step={1}
-          suffix="%"
-          onChange={(v) => handleLimitChange('daily_loss_limit_percent', v)}
-          disabled={saving}
-        />
-        <Stepper
-          label="Futures leverage"
-          value={limits.futures_leverage}
-          min={1} max={5}
-          suffix="x"
-          onChange={(v) => handleLimitChange('futures_leverage', v)}
-          disabled={saving}
-        />
-        <Stepper
-          label="Negative trade timeout"
-          value={limits.negative_trade_timeout_minutes}
-          min={5} max={120} step={5}
-          suffix=" min"
-          onChange={(v) => handleLimitChange('negative_trade_timeout_minutes', v)}
-          disabled={saving}
-        />
       </div>
 
       <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
-        <div className="text-sm font-semibold mb-1">Trade Targets</div>
-        <p className="text-xs mb-4" style={{ color: '#848e9c' }}>
-          When below target, the bot lowers its confidence threshold to find more trades. Set to 0 to disable.
-        </p>
-        <Stepper
-          label="Min trades per 24h"
-          value={limits.min_daily_trades}
-          min={0}
-          max={100}
-          zeroLabel="No minimum"
-          onChange={(v) => handleLimitChange('min_daily_trades', v)}
-          disabled={saving}
-          suggestions={minDailySuggestions}
-        />
-        <Stepper
-          label="Min simultaneous trades"
-          value={limits.min_concurrent_trades}
-          min={0}
-          max={50}
-          zeroLabel="No minimum"
-          onChange={(v) => handleLimitChange('min_concurrent_trades', v)}
-          disabled={saving}
-          suggestions={minConcurrentSuggestions}
-        />
-        <Stepper
-          label="Max trades per 24h (cap)"
-          value={limits.max_daily_trades}
-          min={0}
-          max={500}
-          step={10}
-          zeroLabel="No cap"
-          onChange={(v) => handleLimitChange('max_daily_trades', v)}
-          disabled={saving}
-        />
-      </div>
-
-      <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
-        <div className="text-sm font-semibold mb-1">Trading Goal</div>
-        <p className="text-xs mb-4" style={{ color: '#848e9c' }}>
-          Set a profit target. The bot will adaptively lower its confidence threshold to find more trades when behind pace, and raise it when the goal is achieved.
-        </p>
-        <div className="flex items-center gap-3 mb-3">
-          <div className="flex items-center gap-1.5 flex-1">
-            <span className="text-xs font-medium" style={{ color: '#848e9c' }}>
-              {currency === 'ZAR' ? 'R' : '$'}
-            </span>
-            <input
-              type="number"
-              min="0"
-              step="1"
-              placeholder={currency === 'ZAR' ? '200' : '10'}
-              value={goalInput}
-              onChange={(e) => setGoalInput(e.target.value)}
-              className="flex-1 text-xs px-3 py-2 rounded-lg"
-              style={{
-                background: '#0d0d0d',
-                border: '1px solid #2a2a2a',
-                color: '#eaecef',
-                outline: 'none',
-              }}
-            />
-          </div>
-          <span className="text-xs px-3 py-1.5 rounded-lg" style={{ background: '#0d0d0d', border: '1px solid #2a2a2a', color: '#848e9c', whiteSpace: 'nowrap' }}>
-            7 days
-          </span>
-          <button
-            onClick={handleSaveGoal}
-            disabled={savingGoal}
-            className="px-3 py-2 rounded-lg text-xs font-medium disabled:opacity-40"
-            style={{ background: 'rgba(240,185,11,0.15)', color: '#f0b90b', border: '1px solid rgba(240,185,11,0.3)' }}
-          >
-            {savingGoal ? 'Saving...' : 'Save'}
-          </button>
-        </div>
-        {goal.max_allowed_usdt > 0 && (
-          <div className="text-xs mb-2" style={{ color: '#555' }}>
-            Max realistic: {display(goal.max_allowed_usdt)} based on current capital
-          </div>
-        )}
-        {goal.amount_usdt > 0 && (
-          <div className="text-xs px-3 py-2 rounded-lg" style={{ background: 'rgba(14,203,129,0.06)', color: '#848e9c' }}>
-            Active goal: {display(goal.amount_usdt)} over 7 days
-            {tooltip(goal.amount_usdt) && <span className="ml-1" style={{ color: '#555' }}>· {tooltip(goal.amount_usdt)}</span>}
-          </div>
-        )}
-      </div>
-
-      <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
-        <div className="text-sm font-semibold mb-3">Risk Parameters</div>
-        <InfoRow label="Starting Capital" value={capital !== null ? display(capital) : 'Loading...'} />
-        <InfoRow label="Daily Profit Target" value="+2% / day" />
-        <InfoRow label="Confidence Threshold" value={`>=${(limits.confidence_threshold * 100).toFixed(0)}%`} />
+        <div className="text-sm font-semibold mb-3">Locked Risk Parameters</div>
+        <InfoRow label="Capital" value={capital !== null ? display(capital) : 'Loading...'} />
+        <InfoRow label="Heat Cap" value={`${limits.heat_limit_pct}% of equity`} />
+        <InfoRow label="Open Heat" value={`$${limits.open_heat_usdt}`} />
+        <InfoRow label="Free Heat" value={`$${limits.free_heat_usdt}`} />
+        <InfoRow label="Confidence" value={`>=${(limits.confidence_threshold * 100).toFixed(0)}%`} />
         <InfoRow label="Stop Loss" value={`${limits.stop_loss_percent}%`} />
         <InfoRow label="Take Profit" value={`${limits.take_profit_percent}%`} />
         <InfoRow label="Kill Switch" value={`-${limits.daily_loss_limit_percent}% daily P&L`} />
-        <InfoRow label="Trading Mode" value={limits.trading_mode === 'SPOT' ? 'Spot only' : `Dynamic ${limits.futures_leverage}x leverage`} />
-        <InfoRow label="Max Concurrent Trades" value={String(limits.max_concurrent_trades)} />
         <InfoRow label="Loss Timeout" value={`${limits.negative_trade_timeout_minutes} min`} />
-        <InfoRow label="Min Notional" value="$11 USDT" />
       </div>
 
       <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>

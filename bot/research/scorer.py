@@ -11,6 +11,7 @@ from sqlalchemy import text
 from bot.db.connection import async_session
 from bot.research import ERRORS_KEY, dumps, review_key
 from bot.research.packets import load_candles
+from bot.analysis.structure import classify_structure, detect_zones, is_near_zone, compute_rr_ratio
 
 
 async def load_closed_1h(symbol: str, hour_start: datetime) -> dict[str, float] | None:
@@ -116,6 +117,68 @@ def score_packet(packet: dict[str, Any], actual: dict[str, float], manager_actio
         "usefulness": usefulness,
         "patch": None,
     }
+
+
+async def score_structure(
+    symbol: str,
+    trade_side: str,
+    entry_price: float,
+    sl_price: float,
+    tp_price: float,
+    entry_indicators: dict,
+) -> list[str]:
+    """Score a closed trade against market structure. Returns structure labels."""
+    labels: list[str] = []
+    try:
+        df = await load_candles(symbol, "1h", limit=200)
+        if df is None or len(df) < 30:
+            return labels
+        state = classify_structure(df, lookback=3)
+        zones = detect_zones(df, state)
+
+        atr_col = df["high"] - df["low"]
+        atr_val = float(atr_col.rolling(14).mean().iloc[-1]) if len(df) >= 14 else 0.0
+
+        if atr_val > 0 and is_near_zone(entry_price, zones, trade_side, atr_val):
+            labels.append("entered_at_zone")
+        elif atr_val > 0:
+            labels.append("entered_away_from_zone")
+
+        if state.trend != "RANGE":
+            struct_side = "BUY" if state.trend == "UP" else "SELL"
+            if trade_side == struct_side:
+                labels.append("structure_agreed")
+            else:
+                labels.append("structure_disagreed")
+
+        rr = compute_rr_ratio(entry_price, sl_price, tp_price)
+        if rr >= 2.5:
+            labels.append("rr_honoured")
+        else:
+            labels.append("rr_violated")
+
+        zone_sl = entry_indicators.get("zone_based_sl", False)
+        if zone_sl:
+            current_close = float(df["close"].iloc[-1])
+            if trade_side == "BUY":
+                sl_held = current_close > sl_price
+            else:
+                sl_held = current_close < sl_price
+            labels.append("zone_sl_held" if sl_held else "zone_sl_failed")
+
+        if state.confirmed:
+            if state.bos_side == "BULL" and trade_side == "BUY":
+                labels.append("bos_confirmed_after_entry")
+            elif state.bos_side == "BEAR" and trade_side == "SELL":
+                labels.append("bos_confirmed_after_entry")
+            elif state.bos_side == "BULL" and trade_side == "SELL":
+                labels.append("bos_against_after_entry")
+            elif state.bos_side == "BEAR" and trade_side == "BUY":
+                labels.append("bos_against_after_entry")
+    except Exception as exc:
+        logger.debug(f"{symbol}: structure scoring failed ({exc})")
+
+    return labels
 
 
 async def persist_review(redis, review: dict[str, Any]) -> None:

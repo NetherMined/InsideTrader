@@ -107,75 +107,39 @@ function PnlSplitCard() {
   );
 }
 
-function GoalCard({
-  goalUsdt,
-  goalMaxUsdt,
-  progressUsdt,
-  display,
-  tooltip,
-  goalEnabled,
-  onToggleGoal,
+function HeatCard({
+  heatLimitPct,
+  openHeat,
+  freeHeat,
+  capitalUsdt,
 }: {
-  goalUsdt: number;
-  goalMaxUsdt: number;
-  progressUsdt: number;
-  display: (n: number | null | undefined, d?: number) => string;
-  tooltip: (n: number | null | undefined, d?: number) => string;
-  goalEnabled: boolean;
-  onToggleGoal: () => void;
+  heatLimitPct: number;
+  openHeat: number;
+  freeHeat: number;
+  capitalUsdt: number;
 }) {
-  if (goalUsdt <= 0) {
-    return (
-      <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
-        <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Goal</div>
-        <div className="text-sm font-semibold" style={{ color: '#444' }}>No goal set</div>
-        <div className="text-xs mt-1" style={{ color: '#444' }}>Set in Settings</div>
-      </div>
-    );
-  }
-
-  const pct = Math.min((progressUsdt / goalUsdt) * 100, 100);
-  const achieved = progressUsdt >= goalUsdt;
-  const onTrack = pct >= 10;
-  const goalStatus = achieved ? 'Achieved' : onTrack ? 'On Track' : 'Behind';
-  const statusColor = achieved ? '#0ecb81' : onTrack ? '#f0b90b' : '#f6465d';
+  const heatLimit = capitalUsdt * heatLimitPct / 100;
+  const pct = heatLimit > 0 ? Math.min((openHeat / heatLimit) * 100, 100) : 0;
+  const color = pct >= 90 ? '#f6465d' : pct >= 70 ? '#f0b90b' : '#0ecb81';
 
   return (
-    <div className="rounded-xl p-4" style={{ background: '#111111', border: `1px solid ${achieved ? '#0ecb8133' : '#1f1f1f'}` }}>
+    <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
       <div className="flex items-center justify-between mb-1">
-        <div className="text-xs" style={{ color: '#848e9c' }}>Goal &middot; 7 days</div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold" style={{ color: statusColor }}>{goalStatus}</span>
-          <button
-            onClick={onToggleGoal}
-            className="text-xs px-2 py-0.5 rounded font-semibold"
-            style={{
-              background: goalEnabled ? 'rgba(14,203,129,0.15)' : 'rgba(132,142,156,0.12)',
-              color: goalEnabled ? '#0ecb81' : '#848e9c',
-              border: `1px solid ${goalEnabled ? '#0ecb8133' : '#333'}`,
-              cursor: 'pointer',
-            }}
-          >
-            {goalEnabled ? 'ON' : 'OFF'}
-          </button>
-        </div>
+        <div className="text-xs" style={{ color: '#848e9c' }}>Portfolio Heat</div>
+        <span className="text-xs font-semibold" style={{ color }}>{pct.toFixed(0)}% / {heatLimitPct}%</span>
       </div>
-      <div className="text-xl font-bold" style={{ color: '#e8e8e8' }} title={tooltip(goalUsdt)}>
-        {display(goalUsdt)}
+      <div className="text-xl font-bold" style={{ color: '#e8e8e8' }}>
+        ${openHeat.toFixed(2)}
       </div>
       <div className="mt-2 rounded-full overflow-hidden h-1.5" style={{ background: '#1f1f1f' }}>
         <div
           className="h-full rounded-full transition-all duration-500"
-          style={{ width: `${pct}%`, background: statusColor }}
+          style={{ width: `${pct}%`, background: color }}
         />
       </div>
       <div className="flex items-center justify-between mt-1.5">
-        <span className="text-xs" style={{ color: statusColor }} title={tooltip(progressUsdt)}>
-          {display(progressUsdt)} ({pct.toFixed(0)}%)
-        </span>
-        {goalMaxUsdt > 0 && (
-          <span className="text-xs" style={{ color: '#444' }}>max {display(goalMaxUsdt)}</span>
-        )}
+        <span className="text-xs" style={{ color: '#848e9c' }}>Used</span>
+        <span className="text-xs" style={{ color: '#848e9c' }}>Free: ${freeHeat.toFixed(2)}</span>
       </div>
     </div>
   );
@@ -288,8 +252,6 @@ export default function DashboardPage() {
   const [pnlHistory, setPnlHistory] = useState<{ t: string; pnl: number }[]>([]);
   const [candles, setCandles] = useState<Record<string, Candle[]>>({});
   const [clock, setClock] = useState('');
-  const [effectiveMinTrades, setEffectiveMinTrades] = useState(0);
-  const [goalEnabled, setGoalEnabled] = useState(true);
   const wsRef = useRef<WebSocket | null>(null);
 
   const loadStatus = async () => {
@@ -354,11 +316,7 @@ export default function DashboardPage() {
       }).catch(() => null);
     }
 
-    api.getTradeLimits().catch(() => null).then((limits) => {
-      if (limits) setEffectiveMinTrades(limits.min_concurrent_trades);
-    });
 
-    api.getGoalEnabled().catch(() => null).then((r) => { if (r) setGoalEnabled(r.enabled); });
 
     const interval = setInterval(() => {
       loadStatus();
@@ -380,12 +338,6 @@ export default function DashboardPage() {
       ws.close();
     };
   }, []);
-
-  const handleToggleGoal = async () => {
-    const newVal = !goalEnabled;
-    setGoalEnabled(newVal);
-    await api.setGoalEnabled(newVal).catch(() => null);
-  };
 
   const [startupDismissed, setStartupDismissed] = useState(false);
   const [showStartupModal, setShowStartupModal] = useState(false);
@@ -434,7 +386,7 @@ export default function DashboardPage() {
         <StatCard
           label="Open Trades"
           value={String(status?.open_trades ?? 0)}
-          sub={effectiveMinTrades > 0 ? `Min: ${effectiveMinTrades}` : undefined}
+          sub={undefined}
         />
         <StatCard
           label="Kill Switch"
@@ -442,14 +394,11 @@ export default function DashboardPage() {
           sub="Trips at -10%"
           positive={!status?.kill_switch}
         />
-        <GoalCard
-          goalUsdt={status?.goal_amount_usdt ?? 0}
-          goalMaxUsdt={status?.goal_max_usdt ?? 0}
-          progressUsdt={status?.goal_progress_usdt ?? 0}
-          display={display}
-          tooltip={tooltip}
-          goalEnabled={goalEnabled}
-          onToggleGoal={handleToggleGoal}
+        <HeatCard
+          heatLimitPct={status?.heat_limit_pct ?? 40}
+          openHeat={status?.open_heat_usdt ?? 0}
+          freeHeat={status?.free_heat_usdt ?? 0}
+          capitalUsdt={status?.capital_usdt ?? 0}
         />
       </div>
 

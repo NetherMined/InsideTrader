@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     trading_mode: str = "DYNAMIC"
     trading_pairs: str = "AUTO"
     analysis_timeframe: str = "1h"
-    futures_leverage: int = 5
+    futures_leverage: int = 2
     starting_capital_usdt: float = 100.0
 
     futures_confidence_threshold: float = 0.55
@@ -28,19 +28,22 @@ class Settings(BaseSettings):
     adx_futures_threshold: float = 25.0
 
     daily_target_percent: float = 2.0
-    max_concurrent_trades: int = 20
-    max_daily_trades: int = 200
-    min_daily_trades: int = 50
-    min_concurrent_trades: int = 0
-    confidence_threshold: float = 0.60
-    max_risk_per_trade_percent: float = 2.0
-    stop_loss_percent: float = 1.5
+    confidence_threshold: float = 0.70
+    stop_loss_percent: float = 2.0
     take_profit_percent: float = 3.0
-    take_profit_usdt: float = 0.0
     daily_loss_limit_percent: float = 10.0
-    max_single_coin_exposure_percent: float = 30.0
     negative_trade_timeout_minutes: int = 60
     taker_fee_rate: float = 0.0004
+
+    heat_limit_pct: float = 40.0
+    max_single_symbol_heat_pct: float = 10.0
+
+    min_rr_ratio: float = 2.5
+    zone_sl_max_pct: float = 3.0
+    zone_sl_buffer_atr: float = 0.15
+    zone_proximity_atr: float = 1.0
+    swing_lookback: int = 3
+    structure_cache_ttl: int = 3600
 
     paper_trading_mode: bool = True
     research_enabled: bool = True
@@ -109,5 +112,9 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-GOAL_PERIOD_HOURS = 168  # fixed 7-day window
-MAX_GOAL_FACTOR = 0.15   # 15% of capital
+
+def get_mode_limits(mode: str) -> dict:
+    """Return locked daily/simultaneous caps derived from trading mode."""
+    if mode == "SPOT":
+        return {"max_simultaneous": 3}
+    return {"max_simultaneous": 4}

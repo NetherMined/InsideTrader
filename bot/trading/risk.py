@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from loguru import logger
 import redis.asyncio as aioredis
 
-from bot.config import settings, GOAL_PERIOD_HOURS, MAX_GOAL_FACTOR
+from bot.config import settings, get_mode_limits
 from bot.notifications import telegram, events as ev
 
 STATUS_KEY = "bot:status"
@@ -25,38 +25,25 @@ KILL_KEY = "bot:kill_switch"
 OPEN_COUNT_KEY = "bot:open_count"
 DAILY_TRADE_COUNT_KEY = "bot:daily_trade_count"
 COMMAND_KEY = "bot:command"
-MIN_DAILY_TRADES_KEY = "bot:min_daily_trades"
-MIN_CONCURRENT_KEY = "bot:min_concurrent_trades"
-MAX_CONCURRENT_KEY = "bot:max_concurrent_trades"
-CONFIDENCE_KEY = "bot:confidence_threshold"
-SL_PCT_KEY = "bot:stop_loss_percent"
-TP_PCT_KEY = "bot:take_profit_percent"
-DAILY_LOSS_LIMIT_KEY = "bot:daily_loss_limit_percent"
-LEVERAGE_KEY = "bot:futures_leverage"
-NEG_TIMEOUT_KEY = "bot:negative_trade_timeout_minutes"
 MODE_KEY = "bot:trading_mode"
 DAILY_PNL_USDT_KEY = "bot:daily_pnl_usdt"
-GOAL_KEY = "bot:goal"
-GOAL_ENABLED_KEY = "bot:goal_enabled"
 DEFENSIVE_KEY = "bot:defensive_mode"
 FEES_KEY = "bot:daily_fees"
 GROSS_PNL_KEY = "bot:daily_gross_pnl"
 TOTAL_FEES_KEY = "bot:cumulative_fees"
-MAX_DAILY_TRADES_KEY = "bot:max_daily_trades"
 TRADE_RETURNS_KEY = "bot:trade_returns"
 FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"
-DISABLE_FUTURES_BUY_KEY = "bot:disable_futures_buy"
+HEAT_LIMIT_KEY = "bot:heat_limit_pct"
+OPEN_HEAT_KEY = "bot:open_heat_usdt"
+FREE_HEAT_KEY = "bot:free_heat_usdt"
 
 DEFENSIVE_PARAMS_OVERRIDE = {
     "mode": "SPOT",
     "confidence_threshold": 0.80,
     "stop_loss_percent": 1.0,
     "take_profit_percent": 1.5,
-    "max_concurrent_trades": 3,
     "futures_leverage": 1,
     "negative_trade_timeout_minutes": 8,
-    "min_daily_trades": 0,
-    "min_concurrent_trades": 0,
 }
 DEFENSIVE_RECOVERY_FACTOR = 0.5
 
@@ -89,29 +76,13 @@ class RiskManager:
         val = await self._redis.get(DAILY_PNL_USDT_KEY)
         return float(val or 0.0)
 
-    async def get_goal(self) -> dict | None:
-        raw = await self._redis.get(GOAL_KEY)
-        if not raw:
-            return None
-        try:
-            import json as _json
-            return _json.loads(raw)
-        except Exception:
-            return None
-
-    async def set_goal(self, amount_usdt: float) -> None:
-        import json as _json
-        await self._redis.set(GOAL_KEY, _json.dumps({
-            "amount_usdt": amount_usdt,
-            "period_hours": GOAL_PERIOD_HOURS,
-        }))
-
-    async def get_goal_enabled(self) -> bool:
-        val = await self._redis.get(GOAL_ENABLED_KEY)
-        return val != "0"
-
-    async def set_goal_enabled(self, enabled: bool) -> None:
-        await self._redis.set(GOAL_ENABLED_KEY, "1" if enabled else "0")
+    async def publish_heat(self, capital_usdt: float, open_heat_usdt: float, params: dict) -> None:
+        """Publish heat metrics to Redis for API/dashboard reads."""
+        heat_limit = capital_usdt * params["heat_limit_pct"] / 100
+        free_heat = max(0.0, heat_limit - open_heat_usdt)
+        await self._redis.set(HEAT_LIMIT_KEY, str(params["heat_limit_pct"]))
+        await self._redis.set(OPEN_HEAT_KEY, str(round(open_heat_usdt, 2)))
+        await self._redis.set(FREE_HEAT_KEY, str(round(free_heat, 2)))
 
     async def is_kill_switch_active(self) -> bool:
         await self._reset_if_new_day()
@@ -134,17 +105,10 @@ class RiskManager:
         if already_defensive:
             logger.debug("Defensive mode already active — skipping param backup to avoid overwriting originals")
             return
-        for key, redis_key in [
+        _defensive_redis_map = [
             ("mode", MODE_KEY),
-            ("confidence_threshold", CONFIDENCE_KEY),
-            ("stop_loss_percent", SL_PCT_KEY),
-            ("take_profit_percent", TP_PCT_KEY),
-            ("max_concurrent_trades", MAX_CONCURRENT_KEY),
-            ("futures_leverage", LEVERAGE_KEY),
-            ("negative_trade_timeout_minutes", NEG_TIMEOUT_KEY),
-            ("min_daily_trades", MIN_DAILY_TRADES_KEY),
-            ("min_concurrent_trades", MIN_CONCURRENT_KEY),
-        ]:
+        ]
+        for key, redis_key in _defensive_redis_map:
             val = DEFENSIVE_PARAMS_OVERRIDE.get(key)
             if val is not None:
                 await self._redis.set(f"bot:pre_defensive:{key}", await self._redis.get(redis_key) or "")
@@ -152,17 +116,10 @@ class RiskManager:
         logger.warning("Defensive mode activated — switching to conservative SPOT-only strategy")
 
     async def exit_defensive_mode(self) -> None:
-        for key, redis_key in [
+        _defensive_redis_map = [
             ("mode", MODE_KEY),
-            ("confidence_threshold", CONFIDENCE_KEY),
-            ("stop_loss_percent", SL_PCT_KEY),
-            ("take_profit_percent", TP_PCT_KEY),
-            ("max_concurrent_trades", MAX_CONCURRENT_KEY),
-            ("futures_leverage", LEVERAGE_KEY),
-            ("negative_trade_timeout_minutes", NEG_TIMEOUT_KEY),
-            ("min_daily_trades", MIN_DAILY_TRADES_KEY),
-            ("min_concurrent_trades", MIN_CONCURRENT_KEY),
-        ]:
+        ]
+        for key, redis_key in _defensive_redis_map:
             saved = await self._redis.get(f"bot:pre_defensive:{key}")
             if saved:
                 await self._redis.set(redis_key, saved)
@@ -207,37 +164,38 @@ class RiskManager:
 
     async def get_effective_params(self) -> dict:
         mode_raw = await self._redis.get(MODE_KEY)
-        params = {
-            "mode": mode_raw if mode_raw in ("SPOT", "DYNAMIC") else settings.trading_mode,
-            "confidence_threshold": await self._redis_float(CONFIDENCE_KEY, settings.confidence_threshold),
-            "stop_loss_percent": await self._redis_float(SL_PCT_KEY, settings.stop_loss_percent),
-            "take_profit_percent": await self._redis_float(TP_PCT_KEY, settings.take_profit_percent),
-            "daily_loss_limit_percent": await self._redis_float(DAILY_LOSS_LIMIT_KEY, settings.daily_loss_limit_percent),
-            "futures_leverage": await self._redis_int(LEVERAGE_KEY, settings.futures_leverage),
-            "negative_trade_timeout_minutes": await self._redis_int(NEG_TIMEOUT_KEY, settings.negative_trade_timeout_minutes),
-            "max_concurrent_trades": await self._redis_int(MAX_CONCURRENT_KEY, settings.max_concurrent_trades),
-            "min_concurrent_trades": await self._redis_int(MIN_CONCURRENT_KEY, 0),
-            "min_daily_trades": await self._redis_int(MIN_DAILY_TRADES_KEY, 0),
-        }
+        mode = mode_raw if mode_raw in ("SPOT", "DYNAMIC", "FUTURES") else settings.trading_mode
+        limits = get_mode_limits(mode)
 
-        goal = await self.get_goal()
-        if goal:
-            params["goal_usdt"] = goal.get("amount_usdt", 0.0)
-        else:
-            params["goal_usdt"] = 0.0
-        params["goal_period_hours"] = GOAL_PERIOD_HOURS
-        params["max_daily_trades"] = await self._redis_int(MAX_DAILY_TRADES_KEY, settings.max_daily_trades)
+        params = {
+            "mode": mode,
+            "confidence_threshold": settings.confidence_threshold,
+            "stop_loss_percent": settings.stop_loss_percent,
+            "take_profit_percent": settings.take_profit_percent,
+            "daily_loss_limit_percent": settings.daily_loss_limit_percent,
+            "futures_leverage": settings.futures_leverage,
+            "negative_trade_timeout_minutes": settings.negative_trade_timeout_minutes,
+            "max_concurrent_trades": limits["max_simultaneous"],
+            "heat_limit_pct": settings.heat_limit_pct,
+            "max_single_symbol_heat_pct": settings.max_single_symbol_heat_pct,
+        }
 
         if await self.is_defensive_mode():
             params.update(DEFENSIVE_PARAMS_OVERRIDE)
+            defensive_limits = get_mode_limits(params["mode"])
+            params["max_concurrent_trades"] = defensive_limits["max_simultaneous"]
 
         return params
 
-    async def get_max_goal_usdt(self, capital_usdt: float) -> float:
-        return round(capital_usdt * MAX_GOAL_FACTOR, 2)
-
     async def can_open_trade(
-        self, symbol: str, open_symbols: list[str], max_trades: int | None = None
+        self,
+        symbol: str,
+        open_symbols: list[str],
+        params: dict,
+        capital_usdt: float,
+        open_heat_usdt: float,
+        symbol_heat_usdt: float = 0.0,
+        trade_heat_usdt: float = 0.0,
     ) -> tuple[bool, str]:
         await self._reset_if_new_day()
 
@@ -248,18 +206,25 @@ class RiskManager:
         if cmd in ("stop", "pause"):
             return False, f"Bot is {cmd}ped"
 
-        limit = max_trades if max_trades is not None else settings.max_concurrent_trades
+        max_sim = params["max_concurrent_trades"]
         open_count = len(open_symbols)
-        if open_count >= limit:
-            return False, f"Max concurrent trades reached ({limit})"
+        if open_count >= max_sim:
+            return False, f"Max concurrent trades reached ({max_sim})"
 
         if symbol in open_symbols:
             return False, f"Already holding position in {symbol}"
 
-        daily_count = int(await self._redis.get(DAILY_TRADE_COUNT_KEY) or 0)
-        max_daily = await self._redis_int(MAX_DAILY_TRADES_KEY, settings.max_daily_trades)
-        if max_daily > 0 and daily_count >= max_daily:
-            return False, f"Daily trade cap reached ({daily_count}/{max_daily})"
+        heat_limit = capital_usdt * params["heat_limit_pct"] / 100
+        if open_heat_usdt >= heat_limit:
+            return False, f"Heat cap reached (${open_heat_usdt:.2f} >= ${heat_limit:.2f})"
+
+        free_heat = heat_limit - open_heat_usdt
+        if trade_heat_usdt > 0 and trade_heat_usdt > free_heat:
+            return False, f"Trade heat ${trade_heat_usdt:.2f} exceeds free heat ${free_heat:.2f}"
+
+        max_sym_heat = capital_usdt * params["max_single_symbol_heat_pct"] / 100
+        if symbol_heat_usdt >= max_sym_heat:
+            return False, f"Symbol heat cap reached for {symbol} (${symbol_heat_usdt:.2f} >= ${max_sym_heat:.2f})"
 
         return True, "ok"
 
@@ -400,6 +365,31 @@ class RiskManager:
         if std == 0:
             return 0.0
         return float(returns.mean() / std * np.sqrt(36500))
+
+    async def write_locked_defaults(self, mode: str | None = None) -> None:
+        """Overwrite stale Redis keys with locked defaults on boot."""
+        effective_mode = mode or settings.trading_mode
+        limits = get_mode_limits(effective_mode)
+        locked = {
+            MODE_KEY: effective_mode,
+            "bot:confidence_threshold": str(settings.confidence_threshold),
+            "bot:futures_leverage": str(settings.futures_leverage),
+            "bot:stop_loss_percent": str(settings.stop_loss_percent),
+            "bot:take_profit_percent": str(settings.take_profit_percent),
+            "bot:daily_loss_limit_percent": str(settings.daily_loss_limit_percent),
+            "bot:negative_trade_timeout_minutes": str(settings.negative_trade_timeout_minutes),
+            "bot:max_concurrent_trades": str(limits["max_simultaneous"]),
+            HEAT_LIMIT_KEY: str(settings.heat_limit_pct),
+        }
+        stale_keys = [
+            "bot:min_daily_trades", "bot:min_concurrent_trades",
+            "bot:goal", "bot:goal_enabled", "bot:max_daily_trades",
+        ]
+        for k, v in locked.items():
+            await self._redis.set(k, v)
+        for k in stale_keys:
+            await self._redis.delete(k)
+        logger.info(f"Locked Redis defaults written — mode={effective_mode}, max_sim={limits['max_simultaneous']}")
 
     async def set_status(self, state: str, extra: dict | None = None) -> None:
         payload = {"state": state, "ts": datetime.now(timezone.utc).isoformat()}

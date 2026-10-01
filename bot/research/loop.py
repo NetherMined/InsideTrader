@@ -12,7 +12,7 @@ from bot.data.fetcher import fetch_recent
 from bot.research import PACKET_HOUR_KEY, loads
 from bot.research.packets import build_packet, hour_start_utc, persist_packet
 from bot.research.patcher import apply_tighten_if_allowed, load_rules, maybe_patch, write_pending
-from bot.research.scorer import load_closed_1h, manager_action_for_hour, persist_review, score_packet
+from bot.research.scorer import load_closed_1h, manager_action_for_hour, persist_review, score_packet, score_structure
 
 
 def _seconds_to_next_15m(now: datetime | None = None) -> float:
@@ -41,6 +41,46 @@ async def _score_closed_hour(redis, pairs: list[str], closed_hour: datetime) -> 
             continue
         action = await manager_action_for_hour(symbol, closed_hour)
         review = score_packet(packet, actual, action)
+
+        # Score trades from this hour against market structure
+        if action == "enter":
+            try:
+                from bot.db.connection import async_session
+                from sqlalchemy import text
+                async with async_session() as session:
+                    row = (await session.execute(
+                        text("""
+                            SELECT side, entry_price, stop_loss_price, take_profit_price, extra
+                            FROM trades
+                            WHERE symbol = :symbol
+                              AND opened_at >= :start
+                              AND opened_at < :start + interval '1 hour'
+                            ORDER BY opened_at ASC LIMIT 1
+                        """),
+                        {"symbol": symbol, "start": closed_hour},
+                    )).mappings().first()
+                if row:
+                    import json as _json
+                    extra = row["extra"]
+                    if isinstance(extra, str):
+                        try:
+                            extra = _json.loads(extra)
+                        except Exception:
+                            extra = {}
+                    entry_ind = (extra or {}).get("entry_indicators", {})
+                    struct_labels = await score_structure(
+                        symbol,
+                        trade_side=row["side"],
+                        entry_price=float(row["entry_price"]),
+                        sl_price=float(row["stop_loss_price"]),
+                        tp_price=float(row["take_profit_price"]),
+                        entry_indicators=entry_ind,
+                    )
+                    review["labels"].extend(struct_labels)
+                    review["structure_labels"] = struct_labels
+            except Exception as exc:
+                logger.debug(f"{symbol}: structure scoring in loop failed ({exc})")
+
         await persist_review(redis, review)
         reviews.append(review)
     if not reviews:

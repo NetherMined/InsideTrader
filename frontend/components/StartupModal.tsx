@@ -159,11 +159,9 @@ export function StartupModal({ onConfirmed, onClose }: Props) {
               style={{ background: '#111111', border: '1px solid #1f1f1f' }}
             >
               <SettingRow label="Strategy Mode" value={s.trading_mode} />
-              <SettingRow label="Max Concurrent Trades" value={String(s.max_concurrent_trades)} />
-              <SettingRow label="Confidence Threshold" value={`${(s.confidence_threshold * 100).toFixed(0)}%`} />
-              <SettingRow label="Stop Loss" value={`${s.stop_loss_percent}%`} />
-              <SettingRow label="Take Profit" value={`${s.take_profit_percent}%`} />
-              <SettingRow label="Daily Loss Limit" value={`${s.daily_loss_limit_percent}%`} />
+              <SettingRow label="Heat Cap" value={`${s.heat_limit_pct ?? 40}%`} />
+              <SettingRow label="Max Concurrent" value={String(s.max_concurrent_trades)} />
+              <SettingRow label="Max Daily" value={String(s.max_daily_trades)} />
               <SettingRow label="Futures Leverage" value={`${s.futures_leverage}x`} />
               <SettingRow label="Capital" value={display(status.capital_usdt)} />
             </div>

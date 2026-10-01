@@ -1,64 +1,66 @@
-"""Position sizing calculator.
+"""Heat-based position sizing.
 
-Determines how much capital to allocate per trade, respecting:
-  - Max risk % of portfolio per trade
-  - Max single-coin exposure %
-  - Binance minimum order notional ($10 USDT)
-  - Futures leverage (capital is margin, not notional)
+40% portfolio heat cap. Heat = cash (spot) + margin (futures).
+Per-trade heat = heat_limit / max_simultaneous.
+Single symbol capped at 10% of equity.
 """
 
 from loguru import logger
 from bot.config import settings
 
-MIN_NOTIONAL_FUTURES = 35.0  # $35 notional guarantees ~$1 profit at 3% TP
-MIN_NOTIONAL_SPOT = 10.0     # Binance minimum; SPOT is fallback only, capital stays small
+MIN_NOTIONAL_FUTURES = 35.0
+MIN_NOTIONAL_SPOT = 10.0
+
+
+def calculate_trade_heat(
+    capital_usdt: float,
+    open_heat_usdt: float,
+    symbol_heat_usdt: float,
+    params: dict,
+) -> float:
+    """Return the max USDT heat (cash/margin) this trade may use, or 0 if illegal."""
+    heat_limit = capital_usdt * params["heat_limit_pct"] / 100
+    free_heat = max(0.0, heat_limit - open_heat_usdt)
+
+    max_sim = params["max_concurrent_trades"]
+    per_trade_heat = heat_limit / max_sim if max_sim > 0 else free_heat
+
+    max_sym_heat = capital_usdt * params["max_single_symbol_heat_pct"] / 100
+    sym_remaining = max(0.0, max_sym_heat - symbol_heat_usdt)
+
+    trade_heat = min(per_trade_heat, free_heat, sym_remaining)
+    return trade_heat
 
 
 def calculate_position_size(
     capital_usdt: float,
     price: float,
     mode: str,
-    existing_exposure_usdt: float = 0.0,
+    trade_heat: float,
     leverage: int | None = None,
-    max_risk_per_trade_pct: float | None = None,
 ) -> tuple[float, float]:
-    """Return (quantity_base_asset, notional_usdt) for a trade.
+    """Return (quantity, notional_usdt) sized by heat budget.
 
-    Args:
-        capital_usdt:            Total portfolio value in USDT.
-        price:                   Current asset price in USDT.
-        mode:                    'SPOT' or 'FUTURES'.
-        existing_exposure_usdt:  Already allocated to this asset.
-        leverage:                Futures leverage override (uses settings default if None).
-        max_risk_per_trade_pct:  Per-trade risk % override (uses settings default if None).
-
-    Returns:
-        (quantity, notional_usdt) — both 0.0 if trade is not viable.
+    For SPOT: heat = notional (cash locked).
+    For FUTURES: heat = margin = notional / leverage.
     """
-    risk_pct = max_risk_per_trade_pct if max_risk_per_trade_pct is not None else settings.max_risk_per_trade_percent
-    max_notional = capital_usdt * risk_pct / 100
-    max_coin_exposure = capital_usdt * settings.max_single_coin_exposure_percent / 100
-
-    available = max_coin_exposure - existing_exposure_usdt
-    notional = min(max_notional, available)
+    if trade_heat <= 0 or price <= 0:
+        return 0.0, 0.0
 
     _leverage = leverage if leverage is not None else settings.futures_leverage
+
     if mode == "FUTURES":
-        margin = notional
+        margin = trade_heat
         notional = margin * _leverage
+    else:
+        notional = trade_heat
 
     min_notional = MIN_NOTIONAL_FUTURES if mode == "FUTURES" else MIN_NOTIONAL_SPOT
     if notional < min_notional:
-        # Bump to mode-specific minimum. FUTURES needs $35+ for a meaningful profit.
-        # SPOT fallbacks only need Binance's $10 floor — keeps capital usage small.
-        floored = min(min_notional, available if mode == "SPOT" else capital_usdt * 0.15)
-        if floored < min_notional:
-            logger.warning(
-                f"Insufficient capital for minimum position: ${available:.2f} available, ${min_notional} minimum"
-            )
-            return 0.0, 0.0
-        logger.debug(f"Position bumped from ${notional:.2f} to minimum ${floored:.2f}")
-        notional = floored
+        logger.debug(
+            f"Position notional ${notional:.2f} below minimum ${min_notional} — skipping"
+        )
+        return 0.0, 0.0
 
     quantity = notional / price
     return round(quantity, 8), round(notional, 4)
@@ -75,21 +77,14 @@ def calculate_sl_tp_prices(
 ) -> tuple[float, float]:
     """Return (stop_loss_price, take_profit_price).
 
-    When atr_pct is provided, take-profit is set dynamically to 1.5× ATR,
-    floored at 2.5% and capped at 6.0%, giving larger targets on volatile moves.
-    For futures, stop-loss is tighter due to leverage magnifying losses.
+    TP stretches to 1.5x ATR when available, floored at 3% and capped at 6%.
     """
     _sl_pct = sl_pct if sl_pct is not None else settings.stop_loss_percent
-    _leverage = leverage if leverage is not None else settings.futures_leverage
 
     if atr_pct is not None and atr_pct > 0:
         _tp_pct = max(3.0, min(6.0, atr_pct * 1.5))
     else:
         _tp_pct = tp_pct if tp_pct is not None else settings.take_profit_percent
-
-    # SL/TP are price-level percentages — NOT divided by leverage.
-    # Leverage amplifies the margin P&L (e.g. 2% SL at 5x = 10% margin loss)
-    # but the price target stays at 2% to give trades room to breathe.
 
     if side == "BUY":
         stop_loss = entry_price * (1 - _sl_pct / 100)

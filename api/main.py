@@ -32,8 +32,7 @@ import ccxt.async_support as ccxt
 from api.config import settings
 from api.db import get_session, check_db, async_session as _db_session
 
-_GOAL_PERIOD_HOURS = 168
-_MAX_GOAL_FACTOR = 0.15
+_HEAT_LIMIT_PCT = 40.0
 
 # re-export for inline use in endpoints
 _starting_capital = settings.starting_capital_usdt
@@ -491,10 +490,9 @@ class BotStatusResponse(BaseModel):
     capital_usdt: float
     paper: bool
     kill_switch: bool
-    goal_amount_usdt: float
-    goal_period_hours: int
-    goal_progress_usdt: float
-    goal_max_usdt: float
+    heat_limit_pct: float = 40.0
+    open_heat_usdt: float = 0.0
+    free_heat_usdt: float = 0.0
     total_profit_usdt: float
     total_loss_usdt: float
     win_count: int
@@ -589,16 +587,9 @@ async def get_bot_status():
         daily_pnl_usdt_raw = await redis.get(_DAILY_PNL_USDT_KEY)
         daily_pnl_usdt = float(daily_pnl_usdt_raw) if daily_pnl_usdt_raw else round(daily_pnl * capital / 100, 4)
 
-        goal_raw = await redis.get(_GOAL_KEY)
-        goal_amount_usdt = 0.0
-        if goal_raw:
-            try:
-                goal_data = json.loads(goal_raw)
-                goal_amount_usdt = float(goal_data.get("amount_usdt", 0.0))
-            except Exception:
-                pass
-
-        goal_max_usdt = round(capital * _MAX_GOAL_FACTOR, 2)
+        heat_limit_pct = float(await redis.get("bot:heat_limit_pct") or _HEAT_LIMIT_PCT)
+        open_heat_usdt = float(await redis.get("bot:open_heat_usdt") or 0.0)
+        free_heat_usdt = float(await redis.get("bot:free_heat_usdt") or 0.0)
 
         pnl_summary = {"total_profit_usdt": 0.0, "total_loss_usdt": 0.0, "win_count": 0, "loss_count": 0}
         try:
@@ -653,10 +644,9 @@ async def get_bot_status():
             capital_usdt=capital,
             paper=is_paper,
             kill_switch=kill,
-            goal_amount_usdt=goal_amount_usdt,
-            goal_period_hours=_GOAL_PERIOD_HOURS,
-            goal_progress_usdt=round(daily_pnl_usdt, 4),
-            goal_max_usdt=goal_max_usdt,
+            heat_limit_pct=heat_limit_pct,
+            open_heat_usdt=round(open_heat_usdt, 2),
+            free_heat_usdt=round(free_heat_usdt, 2),
             total_profit_usdt=pnl_summary["total_profit_usdt"],
             total_loss_usdt=pnl_summary["total_loss_usdt"],
             win_count=pnl_summary["win_count"],
@@ -669,110 +659,24 @@ async def get_bot_status():
         await redis.aclose()
 
 
-class GoalResponse(BaseModel):
-    amount_usdt: float
-    period_hours: int
-    max_allowed_usdt: float
-
-
-class SetGoalRequest(BaseModel):
-    amount_usdt: float
-
-
-@app.get("/api/v1/settings/goal", response_model=GoalResponse)
+@app.get("/api/v1/settings/goal")
 async def get_goal():
-    redis = await get_redis()
-    try:
-        raw = await redis.get(_GOAL_KEY)
-        amount_usdt = 0.0
-        if raw:
-            try:
-                amount_usdt = float(json.loads(raw).get("amount_usdt", 0.0))
-            except Exception:
-                pass
-
-        paper_raw = await redis.get(_LIVE_MODE_KEYS["paper_trading_mode"])
-        is_paper = (paper_raw == "true") if paper_raw is not None else settings.paper_trading_mode
-        if is_paper:
-            capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
-        else:
-            try:
-                testnet_raw = await redis.get(_LIVE_MODE_KEYS["use_testnet"])
-                use_testnet = (testnet_raw == "true") if testnet_raw is not None else settings.use_testnet
-                exchange = _get_exchange(use_testnet)
-                try:
-                    bal = await exchange.fetch_balance()
-                    capital = float(bal.get("USDT", {}).get("free", 0.0))
-                finally:
-                    await exchange.close()
-            except Exception:
-                capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
-        max_allowed_usdt = round(capital * _MAX_GOAL_FACTOR, 2)
-
-        return GoalResponse(amount_usdt=amount_usdt, period_hours=_GOAL_PERIOD_HOURS, max_allowed_usdt=max_allowed_usdt)
-    finally:
-        await redis.aclose()
+    raise HTTPException(status_code=410, detail="Goal feature removed — settings are locked")
 
 
-@app.post("/api/v1/settings/goal", response_model=GoalResponse)
-async def set_goal(request: SetGoalRequest):
-    if request.amount_usdt < 0:
-        raise HTTPException(status_code=400, detail="Goal amount must be 0 or greater")
-
-    redis = await get_redis()
-    try:
-        paper_raw = await redis.get(_LIVE_MODE_KEYS["paper_trading_mode"])
-        is_paper = (paper_raw == "true") if paper_raw is not None else settings.paper_trading_mode
-        if is_paper:
-            capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
-        else:
-            try:
-                testnet_raw = await redis.get(_LIVE_MODE_KEYS["use_testnet"])
-                use_testnet = (testnet_raw == "true") if testnet_raw is not None else settings.use_testnet
-                exchange = _get_exchange(use_testnet)
-                try:
-                    bal = await exchange.fetch_balance()
-                    capital = float(bal.get("USDT", {}).get("free", 0.0))
-                finally:
-                    await exchange.close()
-            except Exception:
-                capital = float(await redis.get("paper:capital_usdt") or _starting_capital)
-        max_allowed_usdt = round(capital * _MAX_GOAL_FACTOR, 2)
-
-        if request.amount_usdt > max_allowed_usdt:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Goal exceeds realistic maximum of ${max_allowed_usdt:.2f} over 7 days",
-            )
-
-        await redis.set(_GOAL_KEY, json.dumps({
-            "amount_usdt": request.amount_usdt,
-            "period_hours": _GOAL_PERIOD_HOURS,
-        }))
-        return GoalResponse(amount_usdt=request.amount_usdt, period_hours=_GOAL_PERIOD_HOURS, max_allowed_usdt=max_allowed_usdt)
-    finally:
-        await redis.aclose()
+@app.post("/api/v1/settings/goal")
+async def set_goal():
+    raise HTTPException(status_code=410, detail="Goal feature removed — settings are locked")
 
 
 @app.get("/api/v1/settings/goal-enabled")
 async def get_goal_enabled():
-    redis = await get_redis()
-    try:
-        val = await redis.get("bot:goal_enabled")
-        return {"enabled": val != b"0"}
-    finally:
-        await redis.aclose()
+    raise HTTPException(status_code=410, detail="Goal feature removed — settings are locked")
 
 
 @app.post("/api/v1/settings/goal-enabled")
-async def set_goal_enabled(body: dict = Body(...)):
-    enabled = bool(body.get("enabled", True))
-    redis = await get_redis()
-    try:
-        await redis.set("bot:goal_enabled", "1" if enabled else "0")
-        return {"enabled": enabled}
-    finally:
-        await redis.aclose()
+async def set_goal_enabled():
+    raise HTTPException(status_code=410, detail="Goal feature removed — settings are locked")
 
 
 
@@ -834,81 +738,55 @@ async def set_capital(request: SetCapitalRequest):
         await redis.aclose()
 
 
-_MIN_DAILY_TRADES_KEY = "bot:min_daily_trades"
-_GOAL_KEY = "bot:goal"
 _DAILY_PNL_USDT_KEY = "bot:daily_pnl_usdt"
-_MIN_CONCURRENT_KEY = "bot:min_concurrent_trades"
-_MAX_CONCURRENT_KEY = "bot:max_concurrent_trades"
-_CONFIDENCE_KEY = "bot:confidence_threshold"
-_SL_PCT_KEY = "bot:stop_loss_percent"
-_TP_PCT_KEY = "bot:take_profit_percent"
-_DAILY_LOSS_LIMIT_KEY = "bot:daily_loss_limit_percent"
-_LEVERAGE_KEY = "bot:futures_leverage"
-_NEG_TIMEOUT_KEY = "bot:negative_trade_timeout_minutes"
 _MODE_KEY = "bot:trading_mode"
-_MAX_DAILY_TRADES_KEY = "bot:max_daily_trades"
 _FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"
-_DISABLE_FUTURES_BUY_KEY = "bot:disable_futures_buy"
 
 
 class TradeLimitsResponse(BaseModel):
+    trading_mode: str
     max_concurrent_trades: int
+    max_daily_trades: int
     confidence_threshold: float
     stop_loss_percent: float
     take_profit_percent: float
     daily_loss_limit_percent: float
     futures_leverage: int
     negative_trade_timeout_minutes: int
-    trading_mode: str
-    min_daily_trades: int
-    min_concurrent_trades: int
-    max_daily_trades: int
-    force_trade_mode: str
-    disable_futures_buy: bool
+    heat_limit_pct: float
+    open_heat_usdt: float
+    free_heat_usdt: float
 
 
 class SetTradeLimitsRequest(BaseModel):
-    max_concurrent_trades: int | None = None
-    confidence_threshold: float | None = None
-    stop_loss_percent: float | None = None
-    take_profit_percent: float | None = None
-    daily_loss_limit_percent: float | None = None
-    futures_leverage: int | None = None
-    negative_trade_timeout_minutes: int | None = None
-    trading_mode: str | None = None
-    min_daily_trades: int | None = None
-    min_concurrent_trades: int | None = None
-    max_daily_trades: int | None = None
-    force_trade_mode: str | None = None
-    disable_futures_buy: bool | None = None
+    trading_mode: str
+
+
+def _mode_limits(mode: str) -> dict:
+    if mode == "SPOT":
+        return {"max_daily_trades": 12, "max_simultaneous": 3}
+    return {"max_daily_trades": 16, "max_simultaneous": 4}
 
 
 async def _read_trade_limits(redis) -> TradeLimitsResponse:
-    async def _float(key, default):
-        val = await redis.get(key)
-        return float(val) if val else default
-
-    async def _int(key, default):
-        val = await redis.get(key)
-        return int(val) if val else default
-
     mode_raw = await redis.get(_MODE_KEY)
-    force_mode_raw = await redis.get(_FORCE_TRADE_MODE_KEY)
-    disable_fb_raw = await redis.get(_DISABLE_FUTURES_BUY_KEY)
+    mode = mode_raw if mode_raw in ("SPOT", "DYNAMIC", "FUTURES") else settings.trading_mode
+    limits = _mode_limits(mode)
+    open_heat = float(await redis.get("bot:open_heat_usdt") or 0.0)
+    free_heat = float(await redis.get("bot:free_heat_usdt") or 0.0)
     return TradeLimitsResponse(
-        max_concurrent_trades=await _int(_MAX_CONCURRENT_KEY, settings.max_concurrent_trades),
-        confidence_threshold=await _float(_CONFIDENCE_KEY, settings.confidence_threshold),
-        stop_loss_percent=await _float(_SL_PCT_KEY, settings.stop_loss_percent),
-        take_profit_percent=await _float(_TP_PCT_KEY, settings.take_profit_percent),
-        daily_loss_limit_percent=await _float(_DAILY_LOSS_LIMIT_KEY, settings.daily_loss_limit_percent),
-        futures_leverage=await _int(_LEVERAGE_KEY, settings.futures_leverage),
-        negative_trade_timeout_minutes=await _int(_NEG_TIMEOUT_KEY, settings.negative_trade_timeout_minutes),
-        trading_mode=mode_raw if mode_raw in ("SPOT", "DYNAMIC", "FUTURES") else settings.trading_mode,
-        min_daily_trades=await _int(_MIN_DAILY_TRADES_KEY, 0),
-        min_concurrent_trades=await _int(_MIN_CONCURRENT_KEY, 0),
-        max_daily_trades=await _int(_MAX_DAILY_TRADES_KEY, settings.max_daily_trades),
-        force_trade_mode=force_mode_raw if force_mode_raw in ("SPOT", "FUTURES", "DYNAMIC") else "DYNAMIC",
-        disable_futures_buy=disable_fb_raw == "1",
+        trading_mode=mode,
+        max_concurrent_trades=limits["max_simultaneous"],
+        max_daily_trades=limits["max_daily_trades"],
+        confidence_threshold=settings.confidence_threshold,
+        stop_loss_percent=settings.stop_loss_percent,
+        take_profit_percent=settings.take_profit_percent,
+        daily_loss_limit_percent=settings.daily_loss_limit_percent,
+        futures_leverage=settings.futures_leverage,
+        negative_trade_timeout_minutes=settings.negative_trade_timeout_minutes,
+        heat_limit_pct=_HEAT_LIMIT_PCT,
+        open_heat_usdt=round(open_heat, 2),
+        free_heat_usdt=round(free_heat, 2),
     )
 
 
@@ -923,46 +801,12 @@ async def get_trade_limits():
 
 @app.post("/api/v1/settings/trade-limits", response_model=TradeLimitsResponse)
 async def set_trade_limits(request: SetTradeLimitsRequest):
+    if request.trading_mode not in ("SPOT", "DYNAMIC", "FUTURES"):
+        raise HTTPException(status_code=400, detail="trading_mode must be SPOT, FUTURES, or DYNAMIC")
     redis = await get_redis()
     try:
-        field_map = {
-            "max_concurrent_trades": (_MAX_CONCURRENT_KEY, 1, 50),
-            "confidence_threshold": (_CONFIDENCE_KEY, 0.55, 0.95),
-            "stop_loss_percent": (_SL_PCT_KEY, 0.5, 10.0),
-            "take_profit_percent": (_TP_PCT_KEY, 0.5, 15.0),
-            "daily_loss_limit_percent": (_DAILY_LOSS_LIMIT_KEY, 2.0, 25.0),
-            "futures_leverage": (_LEVERAGE_KEY, 1, 5),
-            "negative_trade_timeout_minutes": (_NEG_TIMEOUT_KEY, 5, 120),
-            "min_daily_trades": (_MIN_DAILY_TRADES_KEY, 0, 500),
-            "max_daily_trades": (_MAX_DAILY_TRADES_KEY, 0, 500),
-            "min_concurrent_trades": (_MIN_CONCURRENT_KEY, 0, 20),
-        }
-        for field, (key, min_val, max_val) in field_map.items():
-            value = getattr(request, field)
-            if value is not None:
-                if value < min_val or value > max_val:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"{field} must be between {min_val} and {max_val}",
-                    )
-                await redis.set(key, str(value))
-
-        if request.trading_mode is not None:
-            if request.trading_mode not in ("SPOT", "DYNAMIC", "FUTURES"):
-                raise HTTPException(status_code=400, detail="trading_mode must be SPOT, FUTURES, or DYNAMIC")
-            await redis.set(_MODE_KEY, request.trading_mode)
-            # Keep force_trade_mode in sync so the executor always picks up the latest mode
-            if request.force_trade_mode is None:
-                await redis.set(_FORCE_TRADE_MODE_KEY, request.trading_mode)
-
-        if request.force_trade_mode is not None:
-            if request.force_trade_mode not in ("SPOT", "FUTURES", "DYNAMIC"):
-                raise HTTPException(status_code=400, detail="force_trade_mode must be SPOT, FUTURES, or DYNAMIC")
-            await redis.set(_FORCE_TRADE_MODE_KEY, request.force_trade_mode)
-
-        if request.disable_futures_buy is not None:
-            await redis.set(_DISABLE_FUTURES_BUY_KEY, "1" if request.disable_futures_buy else "0")
-
+        await redis.set(_MODE_KEY, request.trading_mode)
+        await redis.set(_FORCE_TRADE_MODE_KEY, request.trading_mode)
         return await _read_trade_limits(redis)
     finally:
         await redis.aclose()
@@ -1018,13 +862,10 @@ async def get_startup_status():
             "capital_usdt": round(capital, 2),
             "settings": {
                 "trading_mode": limits.trading_mode,
+                "heat_limit_pct": limits.heat_limit_pct,
                 "max_concurrent_trades": limits.max_concurrent_trades,
-                "confidence_threshold": limits.confidence_threshold,
-                "stop_loss_percent": limits.stop_loss_percent,
-                "take_profit_percent": limits.take_profit_percent,
-                "daily_loss_limit_percent": limits.daily_loss_limit_percent,
+                "max_daily_trades": limits.max_daily_trades,
                 "futures_leverage": limits.futures_leverage,
-                "min_daily_trades": limits.min_daily_trades,
             },
         }
     finally:
@@ -1594,20 +1435,20 @@ async def get_market_sentiment():
             strategy = "Range-bound market — target mean-reversion setups at extremes. Prioritize high-confidence signals and keep position sizes conservative."
 
         capital_raw = await redis.get("paper:capital_usdt")
-        capital = float(capital_raw) if capital_raw else 694.0
-        max_concurrent_raw = await redis.get("bot:max_concurrent_trades")
-        max_concurrent = int(max_concurrent_raw) if max_concurrent_raw else 20
-        min_daily_raw = await redis.get("bot:min_daily_trades")
-        min_daily = int(min_daily_raw) if min_daily_raw else 50
-        sl_raw = await redis.get("bot:stop_loss_percent")
-        sl_pct = float(sl_raw) / 100 if sl_raw else 0.02
-        tp_raw = await redis.get("bot:take_profit_percent")
-        tp_pct = float(tp_raw) / 100 if tp_raw else 0.03
+        capital = float(capital_raw) if capital_raw else 100.0
+        mode_raw = await redis.get("bot:trading_mode")
+        mode = mode_raw if mode_raw in ("SPOT", "DYNAMIC", "FUTURES") else "DYNAMIC"
+        mlimits = _mode_limits(mode)
+        max_concurrent = mlimits["max_simultaneous"]
+        max_daily = mlimits["max_daily_trades"]
+        sl_pct = settings.stop_loss_percent / 100
+        tp_pct = settings.take_profit_percent / 100
 
+        heat_limit = capital * _HEAT_LIMIT_PCT / 100
+        notional_per_trade = heat_limit / max(max_concurrent, 1)
         win_rate = 0.55
-        notional_per_trade = capital / max(max_concurrent, 1)
         expected_pnl_per_trade = notional_per_trade * (win_rate * tp_pct - (1 - win_rate) * sl_pct)
-        expected_trades = min_daily * 0.6
+        expected_trades = max_daily * 0.5
         base_profit = expected_pnl_per_trade * expected_trades
         multiplier = {"BULLISH": 1.25, "NEUTRAL": 1.0, "BEARISH": 0.65}[sentiment]
         estimated_profit = round(base_profit * multiplier, 2)

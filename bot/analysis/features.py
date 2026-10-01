@@ -12,6 +12,7 @@ Features cover four comparison windows:
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 FEATURE_COLS = [
     # Short-term technical
@@ -65,6 +66,13 @@ FEATURE_COLS = [
     "near_support",
     "rsi_oversold",
     "rsi_overbought",
+    "structure_trend",
+    "structure_confirmed",
+    "distance_to_demand_pct",
+    "distance_to_supply_pct",
+    "zone_rr_potential",
+    "swings_since_bos",
+    "zone_touch_count",
 ]
 
 FORWARD_HOURS = 24
@@ -72,6 +80,78 @@ FORWARD_HOURS = 24
 _7D_PERIODS = 7 * 24    # 168 hourly candles
 _30D_PERIODS = 30 * 24  # 720 hourly candles
 _1Y_PERIODS = 365 * 24  # 8760 hourly candles
+
+
+def _add_structure_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Append structure-derived features. Zero-filled if data is insufficient."""
+    try:
+        from bot.analysis.structure import (
+            classify_structure, detect_zones, compute_rr_ratio,
+        )
+    except ImportError:
+        for col in ("structure_trend", "structure_confirmed", "distance_to_demand_pct",
+                     "distance_to_supply_pct", "zone_rr_potential", "swings_since_bos",
+                     "zone_touch_count"):
+            df[col] = 0.0
+        return df
+
+    trend_map = {"UP": 1.0, "DOWN": -1.0, "RANGE": 0.0}
+    defaults = {
+        "structure_trend": 0.0, "structure_confirmed": 0.0,
+        "distance_to_demand_pct": 0.0, "distance_to_supply_pct": 0.0,
+        "zone_rr_potential": 0.0, "swings_since_bos": 0.0, "zone_touch_count": 0.0,
+    }
+    n = len(df)
+    if n < 60:
+        for col, val in defaults.items():
+            df[col] = val
+        return df
+
+    try:
+        state = classify_structure(df, lookback=3)
+        zones = detect_zones(df, state)
+    except Exception:
+        for col, val in defaults.items():
+            df[col] = val
+        return df
+
+    sv = trend_map.get(state.trend, 0.0)
+    sc = 1.0 if state.confirmed else 0.0
+    sb = float(state.swings_since_bos)
+    df["structure_trend"] = sv
+    df["structure_confirmed"] = sc
+    df["swings_since_bos"] = sb
+
+    closes = df["close"].values
+    d_demand = np.zeros(n)
+    d_supply = np.zeros(n)
+    rr_pot = np.zeros(n)
+    z_touch = np.zeros(n)
+
+    demand_zones = [z for z in zones if z.type == "DEMAND" and not z.invalidated]
+    supply_zones = [z for z in zones if z.type == "SUPPLY" and not z.invalidated]
+
+    for i in range(n):
+        c = float(closes[i])
+        if c <= 0:
+            continue
+        if demand_zones:
+            nearest_d = min(demand_zones, key=lambda z: abs(c - z.top))
+            d_demand[i] = (c - nearest_d.top) / c * 100
+            z_touch[i] = float(nearest_d.touches)
+        if supply_zones:
+            nearest_s = min(supply_zones, key=lambda z: abs(z.bottom - c))
+            d_supply[i] = (nearest_s.bottom - c) / c * 100
+        if demand_zones and supply_zones:
+            sl = min(demand_zones, key=lambda z: abs(c - z.top)).bottom
+            tp = min(supply_zones, key=lambda z: abs(z.bottom - c)).bottom
+            rr_pot[i] = compute_rr_ratio(c, sl, tp)
+
+    df["distance_to_demand_pct"] = d_demand
+    df["distance_to_supply_pct"] = d_supply
+    df["zone_rr_potential"] = rr_pot
+    df["zone_touch_count"] = z_touch
+    return df
 
 
 def engineer_features(df: pd.DataFrame, target_pct: float = 1.0) -> pd.DataFrame:
@@ -170,6 +250,8 @@ def engineer_features(df: pd.DataFrame, target_pct: float = 1.0) -> pd.DataFrame
         df["near_support"] = 0.0
     df["rsi_oversold"] = (df["rsi"] < 35).astype(float)
     df["rsi_overbought"] = (df["rsi"] > 70).astype(float)
+
+    df = _add_structure_features(df)
 
     # Forward return targets
     df["fwd_ret"] = df["close"].pct_change(FORWARD_HOURS).shift(-FORWARD_HOURS) * 100

@@ -79,10 +79,9 @@ export interface BotStatus {
   capital_usdt: number;
   paper: boolean;
   kill_switch: boolean;
-  goal_amount_usdt: number;
-  goal_period_hours: number;
-  goal_progress_usdt: number;
-  goal_max_usdt: number;
+  heat_limit_pct: number;
+  open_heat_usdt: number;
+  free_heat_usdt: number;
   total_profit_usdt: number;
   total_loss_usdt: number;
   win_count: number;
@@ -90,13 +89,6 @@ export interface BotStatus {
   defensive_mode?: boolean;
   started_with_usdt?: number;
   futures_usdt?: number;
-}
-
-export interface Goal {
-  amount_usdt: number;
-  period_hours: number;
-  max_allowed_usdt: number;
-  goal_enabled?: boolean;
 }
 
 export interface Candle {
@@ -124,19 +116,18 @@ export interface Backtest {
 }
 
 export interface TradeLimits {
+  trading_mode: string;
   max_concurrent_trades: number;
+  max_daily_trades: number;
   confidence_threshold: number;
   stop_loss_percent: number;
   take_profit_percent: number;
   daily_loss_limit_percent: number;
   futures_leverage: number;
   negative_trade_timeout_minutes: number;
-  trading_mode: string;
-  min_daily_trades: number;
-  min_concurrent_trades: number;
-  max_daily_trades: number;
-  force_trade_mode: string;
-  disable_futures_buy: boolean;
+  heat_limit_pct: number;
+  open_heat_usdt: number;
+  free_heat_usdt: number;
 }
 
 export interface LivePrice {
@@ -203,13 +194,10 @@ export interface StartupStatus {
   capital_usdt: number;
   settings: {
     trading_mode: string;
+    heat_limit_pct: number;
     max_concurrent_trades: number;
-    confidence_threshold: number;
-    stop_loss_percent: number;
-    take_profit_percent: number;
-    daily_loss_limit_percent: number;
+    max_daily_trades: number;
     futures_leverage: number;
-    min_daily_trades: number;
   };
 }
 

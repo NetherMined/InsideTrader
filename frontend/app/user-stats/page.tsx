@@ -155,9 +155,11 @@ export default function UserStatsPage() {
   const todayWins = today?.win_count ?? 0;
   const todayLosses = today?.loss_count ?? 0;
 
-  const goalAmt = status?.goal_amount_usdt ?? 0;
-  const goalProgress = status?.goal_progress_usdt ?? 0;
-  const goalPct = goalAmt > 0 ? Math.min((goalProgress / goalAmt) * 100, 100) : 0;
+  const heatLimitPct = status?.heat_limit_pct ?? 40;
+  const openHeat = status?.open_heat_usdt ?? 0;
+  const capitalUsdt = status?.capital_usdt ?? 0;
+  const heatLimit = capitalUsdt * heatLimitPct / 100;
+  const heatPct = heatLimit > 0 ? Math.min((openHeat / heatLimit) * 100, 100) : 0;
 
   const stateInfo = friendlyState(status?.state ?? 'unknown', status?.defensive_mode);
   const stratInfo = friendlyStrategy(status);
@@ -431,33 +433,31 @@ export default function UserStatsPage() {
         </div>
       </div>
 
-      {goalAmt > 0 && (
-        <div>
-          <SectionTitle>Your Goal</SectionTitle>
-          <div className="rounded-2xl p-5" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
-            <div className="flex justify-between items-end mb-3">
-              <div>
-                <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Target</div>
-                <div className="text-xl font-bold">{display(goalAmt)}</div>
-              </div>
-              <div className="text-right">
-                <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Progress</div>
-                <div
-                  className="text-xl font-bold"
-                  style={{ color: goalPct >= 100 ? '#0ecb81' : '#f0b90b' }}
-                >
-                  {display(goalProgress)}
-                </div>
-              </div>
+      <div>
+        <SectionTitle>Portfolio Heat</SectionTitle>
+        <div className="rounded-2xl p-5" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
+          <div className="flex justify-between items-end mb-3">
+            <div>
+              <div className="text-xs mb-1" style={{ color: '#848e9c' }}>Heat Limit ({heatLimitPct}%)</div>
+              <div className="text-xl font-bold">${heatLimit.toFixed(2)}</div>
             </div>
-            <ProgressBar pct={goalPct} color={goalPct >= 100 ? '#0ecb81' : '#f0b90b'} />
-            <div className="flex justify-between mt-2 text-xs" style={{ color: '#848e9c' }}>
-              <span>{goalPct.toFixed(0)}% complete</span>
-              <span>{goalPct >= 100 ? '🎉 Goal reached!' : `${display(goalAmt - goalProgress)} to go`}</span>
+            <div className="text-right">
+              <div className="text-xs mb-1" style={{ color: '#848e9c' }}>In Use</div>
+              <div
+                className="text-xl font-bold"
+                style={{ color: heatPct >= 90 ? '#f6465d' : heatPct >= 70 ? '#f0b90b' : '#0ecb81' }}
+              >
+                ${openHeat.toFixed(2)}
+              </div>
             </div>
           </div>
+          <ProgressBar pct={heatPct} color={heatPct >= 90 ? '#f6465d' : heatPct >= 70 ? '#f0b90b' : '#0ecb81'} />
+          <div className="flex justify-between mt-2 text-xs" style={{ color: '#848e9c' }}>
+            <span>{heatPct.toFixed(0)}% used</span>
+            <span>Free: ${(status?.free_heat_usdt ?? 0).toFixed(2)}</span>
+          </div>
         </div>
-      )}
+      </div>
 
       <div>
         <SectionTitle>Current Strategy</SectionTitle>

@@ -53,8 +53,13 @@ def maybe_patch(reviews: list[dict[str, Any]], rules: dict[str, Any]) -> dict[st
         "ignored_good_packet": "keep require_15m_confirm but surface packet on dashboard",
         "overfit_15m": "ignore packets that flipped side twice inside the same hour",
         "ignored_invalidation": "flatten when packet invalidation prints",
+        "entered_away_from_zone": "raise confidence threshold +0.03 when no zone within 1 ATR",
+        "structure_disagreed": "block entry when structure trend opposes ML prediction",
+        "rr_violated": "enforce 2.5:1 minimum R:R on all new trades",
+        "zone_sl_failed": "widen zone SL buffer by 0.05 ATR",
+        "bos_against_after_entry": "add structure_confirmed requirement before entry",
     }
-    loosen = top in {"stop_too_tight", "ignored_good_packet"}
+    loosen = top in {"stop_too_tight", "ignored_good_packet", "zone_sl_failed"}
     return {
         "from_rule_version": rules.get("rule_version", 1),
         "change": tighten_map.get(top, f"review label {top}"),
@@ -84,6 +89,16 @@ async def apply_tighten_if_allowed(redis, patch: dict[str, Any], rules: dict[str
         rules["require_15m_confirm"] = True
     if "research_min_confidence" in patch.get("change", ""):
         rules["research_min_confidence"] = min(0.80, float(rules.get("research_min_confidence", 0.55)) + 0.03)
+    if "confidence threshold +0.03" in patch.get("change", ""):
+        rules["confidence_boost_no_zone"] = min(0.15, float(rules.get("confidence_boost_no_zone", 0.0)) + 0.03)
+    if "structure trend opposes" in patch.get("change", ""):
+        rules["require_structure_agreement"] = True
+    if "structure_confirmed requirement" in patch.get("change", ""):
+        rules["require_structure_confirmed"] = True
+    if "2.5:1 minimum R:R" in patch.get("change", ""):
+        rules["enforce_min_rr"] = True
+    if "zone SL buffer" in patch.get("change", ""):
+        rules["zone_sl_buffer_atr"] = min(0.40, float(rules.get("zone_sl_buffer_atr", 0.15)) + 0.05)
     rules["patch_expires_at"] = (
         datetime.now(timezone.utc) + timedelta(hours=int(patch.get("expires_after_hours", 48)))
     ).isoformat()
