@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     use_testnet: bool = False
     binance_region: str = "binance.com"
 
-    trading_mode: str = "DYNAMIC"
+    trading_mode: str = "FUTURES"
     trading_pairs: str = "AUTO"
     analysis_timeframe: str = "1h"
     futures_leverage: int = 2
@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     research_timeframe: str = "15m"
     research_min_confidence: float = 0.55
     require_15m_confirm: bool = True
-    allow_1h_only_if_research_stale: bool = True
+    allow_1h_only_if_research_stale: bool = False
     research_stale_minutes: int = 20
     patch_window_hours: int = 10
     patch_min_label_count: int = 4
@@ -114,7 +114,5 @@ settings = Settings()
 
 
 def get_mode_limits(mode: str) -> dict:
-    """Return locked daily/simultaneous caps derived from trading mode."""
-    if mode == "SPOT":
-        return {"max_simultaneous": 3}
+    """Futures-only. Spot is disabled; mode argument is ignored."""
     return {"max_simultaneous": 4}

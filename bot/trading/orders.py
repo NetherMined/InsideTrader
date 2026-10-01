@@ -38,8 +38,8 @@ def _futures_exchange(use_testnet: bool | None = None) -> ccxt.binance:
 
 
 async def get_account_balance(use_testnet: bool | None = None) -> float | None:
-    """Return total USDT balance from Binance account, or None on failure."""
-    exchange = _spot_exchange(use_testnet)
+    """Return free USDT from the USDM futures wallet. Spot is not used."""
+    exchange = _futures_exchange(use_testnet)
     try:
         balance = await exchange.fetch_balance()
         return float(balance.get("USDT", {}).get("free", 0.0))

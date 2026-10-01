@@ -106,7 +106,7 @@ async def hourly_refresh(
         try:
             markets = await scan_markets()
             await save_scanned_markets(markets)
-            refreshed = await get_top_pairs(100)
+            refreshed = await get_top_pairs(100, market_type="future")
             await fetch_recent(refreshed, settings.analysis_timeframe)
             if settings.research_enabled:
                 await fetch_recent(refreshed, settings.research_timeframe)
@@ -150,7 +150,7 @@ async def main() -> None:
     logger.info(f"Orders:  {'PAPER (simulated)' if settings.paper_trading_mode else 'LIVE'}")
     logger.info(f"Capital: ${settings.starting_capital_usdt:.2f} USDT (config default — actual set via settings page)")
     logger.info(f"Target:  {settings.daily_target_percent}% / day")
-    logger.info(f"Mode:    {settings.trading_mode}")
+    logger.info(f"Mode:    FUTURES (spot disabled)")
     logger.info("=" * 60)
 
     await startup_checks()
@@ -161,7 +161,7 @@ async def main() -> None:
     markets = await scan_markets()
     await save_scanned_markets(markets)
 
-    top_pairs = await get_top_pairs(100)
+    top_pairs = await get_top_pairs(100, market_type="future")
     pairs = settings.pairs_list or top_pairs
     logger.info(f"Using {len(pairs)} pairs")
 
@@ -176,6 +176,9 @@ async def main() -> None:
     logger.info(f"Analysis complete — {len(ranked)} ranked opportunities")
 
     redis = _make_redis()
+    await redis.set("bot:trading_mode", "FUTURES")
+    await redis.set("bot:force_trade_mode", "FUTURES")
+    await redis.delete("bot:disable_futures_buy")
     stop_event = asyncio.Event()
     ranked_store = {"pairs": ranked}
 

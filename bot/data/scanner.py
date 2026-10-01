@@ -29,10 +29,10 @@ def _make_auth_exchange(market_type: str = "spot") -> ccxt.binance:
 
 
 async def scan_markets() -> list[dict]:
-    """Fetch all active USDT pairs from Binance spot and futures markets."""
+    """Fetch active USDT-M perpetual pairs. Spot is not scanned."""
     results: list[dict] = []
 
-    for i, market_type in enumerate(["spot", "future"]):
+    for i, market_type in enumerate(["future"]):
         if i > 0:
             await asyncio.sleep(2)
         exchange = _make_public_exchange(market_type)

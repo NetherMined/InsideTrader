@@ -38,7 +38,7 @@ OPEN_HEAT_KEY = "bot:open_heat_usdt"
 FREE_HEAT_KEY = "bot:free_heat_usdt"
 
 DEFENSIVE_PARAMS_OVERRIDE = {
-    "mode": "SPOT",
+    "mode": "FUTURES",
     "confidence_threshold": 0.80,
     "stop_loss_percent": 1.0,
     "take_profit_percent": 1.5,
@@ -113,7 +113,7 @@ class RiskManager:
             if val is not None:
                 await self._redis.set(f"bot:pre_defensive:{key}", await self._redis.get(redis_key) or "")
                 await self._redis.set(redis_key, str(val))
-        logger.warning("Defensive mode activated — switching to conservative SPOT-only strategy")
+        logger.warning("Defensive mode activated — futures only, tighter risk")
 
     async def exit_defensive_mode(self) -> None:
         _defensive_redis_map = [
@@ -163,8 +163,7 @@ class RiskManager:
             return default
 
     async def get_effective_params(self) -> dict:
-        mode_raw = await self._redis.get(MODE_KEY)
-        mode = mode_raw if mode_raw in ("SPOT", "DYNAMIC", "FUTURES") else settings.trading_mode
+        mode = "FUTURES"
         limits = get_mode_limits(mode)
 
         params = {

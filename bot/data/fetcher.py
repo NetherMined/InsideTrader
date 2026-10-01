@@ -22,8 +22,13 @@ BATCH_SIZE = 1000
 REQUEST_DELAY = 0.2
 
 
+def _futures_symbol(symbol: str) -> str:
+    """BTC/USDT → BTC/USDT:USDT for USDM candles. Storage key stays BTC/USDT."""
+    return symbol if ":" in symbol else f"{symbol}:USDT"
+
+
 def _make_exchange() -> ccxt.binance:
-    return ccxt.binance({"options": {"defaultType": "spot"}})
+    return ccxt.binance({"options": {"defaultType": "future"}})
 
 
 def _timeframe_to_ms(timeframe: str) -> int:
@@ -80,7 +85,7 @@ async def fetch_pair(symbol: str, timeframe: str, exchange: ccxt.binance) -> int
     while since_ms < now_ms:
         try:
             ohlcv = await exchange.fetch_ohlcv(
-                symbol, timeframe, since=since_ms, limit=BATCH_SIZE
+                _futures_symbol(symbol), timeframe, since=since_ms, limit=BATCH_SIZE
             )
         except ccxt.BadSymbol:
             logger.warning(f"Symbol {symbol} not available, skipping")

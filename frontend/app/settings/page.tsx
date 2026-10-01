@@ -97,9 +97,7 @@ function ModeToggle({
   disabled?: boolean;
 }) {
   const MODES: { key: string; label: string; desc: string }[] = [
-    { key: 'SPOT', label: 'Spot Only', desc: 'BUY only, no leverage' },
-    { key: 'DYNAMIC', label: 'Dynamic', desc: 'ML picks Spot or Futures' },
-    { key: 'FUTURES', label: 'Futures Only', desc: 'All trades use leverage' },
+    { key: 'FUTURES', label: 'Futures Only', desc: 'USDM perpetuals. Spot routing is disabled.' },
   ];
   return (
     <div className="py-2" style={{ borderBottom: '1px solid #1a1a1a' }}>
@@ -129,7 +127,7 @@ function ModeToggle({
 }
 
 const DEFAULT_LIMITS: TradeLimits = {
-  trading_mode: 'DYNAMIC',
+  trading_mode: 'FUTURES',
   max_concurrent_trades: 4,
   max_daily_trades: 16,
   confidence_threshold: 0.70,
@@ -621,7 +619,7 @@ export default function SettingsPage() {
         <InfoRow label="Max ATR%" value="<= 5%" />
         <InfoRow label="Min ADX" value=">= 25" />
         <div className="mt-3 text-xs p-3 rounded-lg" style={{ background: 'rgba(240,185,11,0.08)', color: '#848e9c' }}>
-          All 3 conditions must pass simultaneously to use FUTURES mode. Otherwise SPOT is used.
+          Futures only. Spot scanning, spot orders, and spot fallback are disabled. Side comes from structure alignment, not the raw model sign.
         </div>
       </div>
 

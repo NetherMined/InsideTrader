@@ -575,7 +575,7 @@ async def get_bot_status():
             try:
                 testnet_raw = await redis.get(_LIVE_MODE_KEYS["use_testnet"])
                 use_testnet = (testnet_raw == "true") if testnet_raw is not None else settings.use_testnet
-                exchange = _get_exchange(use_testnet)
+                exchange = _get_futures_exchange(use_testnet)
                 try:
                     bal = await exchange.fetch_balance()
                     capital = float(bal.get("USDT", {}).get("free", 0.0))
@@ -704,7 +704,7 @@ async def get_capital():
             capital = float(raw) if raw else _starting_capital
         else:
             try:
-                exchange = _get_exchange()
+                exchange = _get_futures_exchange()
                 try:
                     bal = await exchange.fetch_balance()
                     capital = float(bal.get("USDT", {}).get("free", 0.0))
@@ -763,14 +763,11 @@ class SetTradeLimitsRequest(BaseModel):
 
 
 def _mode_limits(mode: str) -> dict:
-    if mode == "SPOT":
-        return {"max_daily_trades": 12, "max_simultaneous": 3}
     return {"max_daily_trades": 16, "max_simultaneous": 4}
 
 
 async def _read_trade_limits(redis) -> TradeLimitsResponse:
-    mode_raw = await redis.get(_MODE_KEY)
-    mode = mode_raw if mode_raw in ("SPOT", "DYNAMIC", "FUTURES") else settings.trading_mode
+    mode = "FUTURES"
     limits = _mode_limits(mode)
     open_heat = float(await redis.get("bot:open_heat_usdt") or 0.0)
     free_heat = float(await redis.get("bot:free_heat_usdt") or 0.0)
@@ -801,12 +798,13 @@ async def get_trade_limits():
 
 @app.post("/api/v1/settings/trade-limits", response_model=TradeLimitsResponse)
 async def set_trade_limits(request: SetTradeLimitsRequest):
-    if request.trading_mode not in ("SPOT", "DYNAMIC", "FUTURES"):
-        raise HTTPException(status_code=400, detail="trading_mode must be SPOT, FUTURES, or DYNAMIC")
+    if request.trading_mode != "FUTURES":
+        raise HTTPException(status_code=400, detail="Spot and dynamic routing are disabled. trading_mode must be FUTURES")
     redis = await get_redis()
     try:
-        await redis.set(_MODE_KEY, request.trading_mode)
-        await redis.set(_FORCE_TRADE_MODE_KEY, request.trading_mode)
+        await redis.set(_MODE_KEY, "FUTURES")
+        await redis.set(_FORCE_TRADE_MODE_KEY, "FUTURES")
+        await redis.delete("bot:disable_futures_buy")
         return await _read_trade_limits(redis)
     finally:
         await redis.aclose()
@@ -842,7 +840,7 @@ async def get_startup_status():
             capital = float(await redis.get("paper:capital_usdt") or settings.starting_capital_usdt)
         else:
             try:
-                exchange = _get_exchange(use_testnet)
+                exchange = _get_futures_exchange(use_testnet)
                 try:
                     bal = await exchange.fetch_balance()
                     capital = float(bal.get("USDT", {}).get("free", 0.0))
@@ -1001,7 +999,7 @@ async def get_account_balances():
     finally:
         await redis.aclose()
 
-    exchange = _get_exchange(use_testnet)
+    exchange = _get_futures_exchange(use_testnet)
     try:
         balance = await exchange.fetch_balance()
         assets: list[AssetBalance] = []
@@ -1071,7 +1069,7 @@ async def convert_all_to_usdt():
     finally:
         await redis.aclose()
 
-    exchange = _get_exchange(use_testnet)
+    exchange = _get_futures_exchange(use_testnet)
     results = []
     try:
         balance = await exchange.fetch_balance()
@@ -1437,7 +1435,7 @@ async def get_market_sentiment():
         capital_raw = await redis.get("paper:capital_usdt")
         capital = float(capital_raw) if capital_raw else 100.0
         mode_raw = await redis.get("bot:trading_mode")
-        mode = mode_raw if mode_raw in ("SPOT", "DYNAMIC", "FUTURES") else "DYNAMIC"
+        mode = "FUTURES"
         mlimits = _mode_limits(mode)
         max_concurrent = mlimits["max_simultaneous"]
         max_daily = mlimits["max_daily_trades"]

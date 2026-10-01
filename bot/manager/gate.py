@@ -1,7 +1,7 @@
 """Manager entry gate — trend alignment + researcher confirmation.
 
-Both bot_prediction (1h model) and market_trend (1h EMAs + 15m packet)
-must agree before an order. Mode decides venue + side legality.
+Futures only. Both bot_prediction (1h model) and market_trend (structure,
+then EMA) must agree before an order. The returned side is the order side.
 Researcher never calls this with an order.
 """
 
@@ -23,6 +23,8 @@ class Decision:
     reason: str
     packet: dict[str, Any] | None = None
     rules: dict[str, Any] | None = None
+    venue: str = "FUTURES"
+    side: str = ""
 
 
 def _stale(packet: dict[str, Any], now: datetime) -> bool:
@@ -52,100 +54,65 @@ def compute_market_trend(
     ema50: float,
     packet: dict[str, Any] | None,
     regime: str = "UNKNOWN",
-    mode: str = "DYNAMIC",
+    mode: str = "FUTURES",
     bot_prediction: str = "NONE",
     structure: StructureState | None = None,
 ) -> str:
-    """Market trend from structure + 15m packet agreement.
+    """Market trend from structure, then EMA. Returns BULL / BEAR / NONE.
 
-    Uses market structure (HH/HL/LL/LH) as primary trend signal.
-    Falls back to EMA cross when structure is unavailable.
-    Returns BULL / BEAR / NONE.
+    A fresh 15m packet can confirm the structure trend. It cannot flip it.
+    A missing or stale packet does not invent a trend.
     """
-    if structure and structure.trend != "RANGE":
-        base_trend = "BULL" if structure.trend == "UP" else "BEAR"
+    if structure and structure.trend == "UP":
+        base_trend = "BULL"
+    elif structure and structure.trend == "DOWN":
+        base_trend = "BEAR"
     elif ema21 > 0 and ema50 > 0:
         base_trend = "BULL" if ema21 > ema50 else "BEAR"
     else:
         base_trend = "NONE"
 
+    if base_trend == "NONE":
+        return "NONE"
+
     if packet and packet.get("arm") and not packet.get("invalidation_hit"):
         pkt_conf = float(packet.get("confidence") or 0)
         pkt_side = packet.get("pred_1h_close_side", "")
         pkt_trend = "BULL" if pkt_side == "bull" else "BEAR" if pkt_side == "bear" else "NONE"
-
-        if pkt_conf >= settings.research_min_confidence and pkt_trend == base_trend:
-            trend = base_trend
-        elif structure and structure.trend != "RANGE" and bot_prediction == base_trend:
-            # Structure trend + ML agree on direction — allow even if 15m packet disagrees.
-            # 15m packets flip frequently; structure + ML alignment is sufficient.
-            trend = base_trend
-        else:
-            trend = "NONE"
-    else:
-        # No packet: allow if structure gives a directional signal matching ML
-        if structure and structure.trend != "RANGE" and bot_prediction == base_trend:
-            trend = base_trend
-        else:
-            trend = "NONE"
+        if pkt_conf >= settings.research_min_confidence and pkt_trend not in ("NONE", base_trend):
+            return "NONE"
 
     if regime == "RANGING" or (structure and structure.trend == "RANGE"):
-        if trend == "BULL" and bot_prediction == "BULL":
-            return "BULL"
-        if trend == "BEAR" and bot_prediction == "BEAR" and mode in ("FUTURES", "DYNAMIC"):
-            return "BEAR"
+        if bot_prediction == base_trend:
+            return base_trend
         return "NONE"
 
-    return trend
+    return base_trend
 
 
 def get_aligned_action(
     bot_prediction: str,
     market_trend: str,
-    mode: str,
+    mode: str = "FUTURES",
     adx_1h: float = 0.0,
     adx_15m: float = 0.0,
+    sentiment: str = "NEUTRAL",
 ) -> tuple[str, str]:
-    """Return (venue, side) or ("SKIP", reason).
-
-    Alignment matrix from SETTINGS_LOCKDOWN.md 5.2.
-    """
+    """Return (FUTURES, side) or (SKIP, reason). Spot is not a venue."""
     if bot_prediction == "NONE":
         return "SKIP", "no_prediction"
-
     if market_trend == "NONE":
-        # No market trend signal — allow ML direction but only in FUTURES/DYNAMIC (risk is capped by SL)
-        if mode in ("FUTURES", "DYNAMIC"):
-            direction = bot_prediction
-        else:
-            return "SKIP", "no_trend_spot"
-    elif bot_prediction != market_trend:
+        return "SKIP", "no_trend"
+    if bot_prediction != market_trend:
         return "SKIP", f"disagree_bot={bot_prediction}_mkt={market_trend}"
-    else:
-        direction = bot_prediction
 
-    if mode == "SPOT":
-        if direction == "BULL":
-            return "SPOT", "BUY"
-        return "SKIP", "spot_no_short"
+    if sentiment == "BULLISH" and bot_prediction == "BEAR":
+        return "SKIP", "sentiment_blocks_short"
+    if sentiment == "BEARISH" and bot_prediction == "BULL":
+        return "SKIP", "sentiment_blocks_long"
 
-    if mode == "FUTURES":
-        side = "BUY" if direction == "BULL" else "SELL"
-        return "FUTURES", side
-
-    # DYNAMIC: strong trend -> futures; otherwise spot for bull, futures for bear
-    strong_1h = adx_1h >= 25
-    if direction == "BULL":
-        if strong_1h:
-            return "FUTURES", "BUY"
-        return "SPOT", "BUY"
-    else:
-        if strong_1h:
-            return "FUTURES", "SELL"
-        # Moderate ADX: still allow short via futures (SL caps risk)
-        if adx_1h >= 18:
-            return "FUTURES", "SELL"
-        return "SKIP", "weak_bear_dynamic"
+    side = "BUY" if bot_prediction == "BULL" else "SELL"
+    return "FUTURES", side
 
 
 async def should_enter(
@@ -158,51 +125,48 @@ async def should_enter(
     ema50: float = 0.0,
     adx: float = 0.0,
     regime: str = "UNKNOWN",
-    mode: str = "DYNAMIC",
+    mode: str = "FUTURES",
     structure: StructureState | None = None,
+    sentiment: str = "NEUTRAL",
 ) -> Decision:
-    """Full alignment gate. Called after 1h executor determines raw side."""
-    if not settings.research_enabled:
-        return Decision(True, "research_disabled")
-
+    """Full alignment gate. Caller must place decision.side on FUTURES."""
     rules = await load_rules(redis)
-    raw = await redis.get(packet_key(symbol))
-    packet = loads(raw)
+    raw = await redis.get(packet_key(symbol)) if settings.research_enabled else None
+    packet = loads(raw) if raw else None
     now = datetime.now(timezone.utc)
 
-    if not packet:
-        if settings.allow_1h_only_if_research_stale:
-            return Decision(True, "no_packet_allow_1h", rules=rules)
-        return Decision(False, "no_packet", rules=rules)
-
-    if _stale(packet, now):
-        if settings.allow_1h_only_if_research_stale:
-            return Decision(True, "stale_packet_allow_1h", packet=packet, rules=rules)
-        return Decision(False, "stale_packet", packet=packet, rules=rules)
+    if packet and _stale(packet, now):
+        packet = None
 
     bot_pred = compute_bot_prediction(predicted_change_pct, confidence)
-    adx_15m = float(packet.get("adx", 0.0))
+    adx_15m = float(packet.get("adx", 0.0)) if packet else 0.0
 
     market = compute_market_trend(
-        ema21, ema50, packet, regime=regime, mode=mode, bot_prediction=bot_pred,
+        ema21, ema50, packet, regime=regime, mode="FUTURES", bot_prediction=bot_pred,
         structure=structure,
     )
 
     venue, side_or_reason = get_aligned_action(
-        bot_pred, market, mode, adx_1h=adx, adx_15m=adx_15m,
+        bot_pred, market, "FUTURES", adx_1h=adx, adx_15m=adx_15m, sentiment=sentiment,
     )
     if venue == "SKIP":
         return Decision(False, f"alignment_skip:{side_or_reason}", packet=packet, rules=rules)
 
-    # Packet arm / invalidation / confidence checks
-    require = bool(rules.get("require_15m_confirm", settings.require_15m_confirm))
-    min_conf = float(rules.get("research_min_confidence", settings.research_min_confidence))
-    if require:
-        if packet.get("invalidation_hit"):
-            return Decision(False, "invalidation_hit", packet=packet, rules=rules)
-        if not packet.get("arm"):
-            return Decision(False, "not_armed", packet=packet, rules=rules)
-        if float(packet.get("confidence") or 0) < min_conf:
-            return Decision(False, "research_confidence", packet=packet, rules=rules)
+    if structure and structure.confirmed:
+        if side_or_reason == "SELL" and structure.trend == "UP":
+            return Decision(False, "structure_blocks_short", packet=packet, rules=rules)
+        if side_or_reason == "BUY" and structure.trend == "DOWN":
+            return Decision(False, "structure_blocks_long", packet=packet, rules=rules)
 
-    return Decision(True, "aligned", packet=packet, rules=rules)
+    if settings.research_enabled and packet:
+        require = bool(rules.get("require_15m_confirm", settings.require_15m_confirm))
+        min_conf = float(rules.get("research_min_confidence", settings.research_min_confidence))
+        if require:
+            if packet.get("invalidation_hit"):
+                return Decision(False, "invalidation_hit", packet=packet, rules=rules)
+            if not packet.get("arm"):
+                return Decision(False, "not_armed", packet=packet, rules=rules)
+            if float(packet.get("confidence") or 0) < min_conf:
+                return Decision(False, "research_confidence", packet=packet, rules=rules)
+
+    return Decision(True, "aligned", packet=packet, rules=rules, venue="FUTURES", side=side_or_reason)

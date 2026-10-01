@@ -19,7 +19,7 @@ PRICE_TTL = 60
 
 
 def _make_exchange() -> ccxt.binance:
-    return ccxt.binance({"options": {"defaultType": "spot"}})
+    return ccxt.binance({"options": {"defaultType": "future"}})
 
 
 async def _get_redis() -> aioredis.Redis:
@@ -42,13 +42,15 @@ async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
     try:
         while not stop_event.is_set():
             try:
-                tickers = await exchange.fetch_tickers(active_pairs)
+                futures_pairs = [s if ":" in s else f"{s}:USDT" for s in active_pairs]
+                tickers = await exchange.fetch_tickers(futures_pairs)
                 pipe = redis.pipeline()
 
                 for symbol, ticker in tickers.items():
                     price = ticker.get("last") or ticker.get("close")
                     if price is None:
                         continue
+                    symbol = symbol.split(":")[0]
 
                     payload = json.dumps({
                         "symbol": symbol,

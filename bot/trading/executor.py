@@ -416,9 +416,8 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                     close_reason = "stop_loss"
                     logger.info(f"{symbol}: SL triggered - exit capped at ${safe_exit:.4f} (effective {effective_pnl_pct:.2f}%)")
                 elif tp_hit:
-                    # TP follower: mark TP hit, keep trade open, only close on retrace below TP
-                    await redis.setex(tp_trail_key, 7200, str(take_profit))
-                    logger.info(f"{symbol}: TP hit at ${take_profit:.4f} - TP follower activated, riding the trend")
+                    close_reason = "take_profit"
+                    logger.info(f"{symbol}: TP hit at ${take_profit:.4f} — closing")
                 else:
                     # TP follower retrace check
                     tp_trail_raw = await redis.get(tp_trail_key)
@@ -559,8 +558,9 @@ async def _try_open_trade(
     # Load structure early so both the gate and the entry filter can use it
     struct_state, zones = await _load_structure_cached(redis, symbol)
 
-    # Dual-bot alignment gate: bot_prediction must match market_trend.
+    # Dual-bot alignment gate owns venue and side. Spot is not a venue.
     regime_name = regime_result.regime if regime_result else "UNKNOWN"
+    market_sentiment, advance_ratio = await _get_market_sentiment(redis)
     try:
         from bot.manager.gate import should_enter
         decision = await should_enter(
@@ -571,19 +571,22 @@ async def _try_open_trade(
             ema50=getattr(pair, "ema50", 0.0),
             adx=pair.adx,
             regime=regime_name,
-            mode=effective_mode_param,
+            mode="FUTURES",
             structure=struct_state,
+            sentiment=market_sentiment,
         )
-        if not decision.ok:
+        if not decision.ok or decision.side not in ("BUY", "SELL"):
             logger.debug(f"{symbol}: alignment gate skip — {decision.reason}")
             return False
+        side = decision.side
         if decision.packet:
             try:
                 pair.research_packet = decision.packet  # type: ignore[attr-defined]
             except Exception:
                 pass
     except Exception as gate_exc:
-        logger.warning(f"{symbol}: alignment gate error ({gate_exc}) — allowing 1h path")
+        logger.warning(f"{symbol}: alignment gate error ({gate_exc}) — standing down")
+        return False
 
     # Funding rate awareness: prefer the side that collects funding
     funding_signal = None
@@ -597,45 +600,13 @@ async def _try_open_trade(
             else:
                 logger.debug(f"{symbol}: funding signal {funding_signal} opposes predicted {side}")
 
-    # Read market sentiment once — used for both mode selection and direction filter
-    market_sentiment, advance_ratio = await _get_market_sentiment(redis)
-
-    # Gate FUTURES mode if funding is unfavorable and confidence is low
-    if effective_mode_param == "FUTURES":
-        mode = "FUTURES"
-    elif effective_mode_param != "SPOT":
-        funding_rate = funding_rates.get(symbol, {}).get("funding_rate", 0.0) if funding_rates else 0.0
-        from bot.analysis.funding_rate import should_avoid_futures
-        if should_avoid_futures(funding_rate, effective_confidence, side=side):
-            logger.info(f"{symbol}: avoiding FUTURES due to unfavorable funding ({funding_rate:.6f})")
-            mode = "SPOT"
-        else:
-            mode = classify_mode(
-                effective_confidence, pair.atr_pct, pair.adx,
-                trading_mode=effective_mode_param,
-                confidence_threshold=params["confidence_threshold"],
-            )
-    else:
-        mode = "SPOT"
-
-    # FUTURES BUY learning gate: if disabled, downgrade to SPOT BUY (shorts still allowed)
-    # Exception: in FUTURES-only force mode, skip BUY entirely instead of falling back to SPOT
-    if mode == "FUTURES" and side == "BUY":
-        disable_fb_raw = await redis.get(_DISABLE_FUTURES_BUY_KEY)
-        if disable_fb_raw == "1":
-            if force_mode == "FUTURES":
-                logger.debug(f"{symbol}: FUTURES BUY gated — skipping (FUTURES-only mode, no SPOT fallback)")
-                return False
-            logger.debug(f"{symbol}: FUTURES BUY gated by learning rule - switching to SPOT BUY")
-            mode = "SPOT"
-
-    logger.debug(f"{symbol}: market sentiment={market_sentiment} ({advance_ratio:.0%} advancing) side={side}")
+    mode = "FUTURES"
+    logger.debug(f"{symbol}: market sentiment={market_sentiment} ({advance_ratio:.0%} advancing) side={side} venue=FUTURES")
 
     mode_flags = await _get_trading_mode_flags(redis)
     paper = mode_flags["paper"]
 
-    if side == "SELL" and mode == "SPOT":
-        logger.debug(f"Skip {symbol}: SHORT not supported in SPOT mode")
+    if side not in ("BUY", "SELL"):
         return False
 
     # Compute heat for this trade
@@ -678,12 +649,10 @@ async def _try_open_trade(
     if not current_price or current_price <= 0:
         return False
 
-    # Phase 3: Structure awareness — penalise counter-trend but don't hard-block
-    # (hard-blocking starves the bot when ML systematically predicts against trend)
     if struct_state and struct_state.confirmed:
         if (side == "BUY" and struct_state.trend == "DOWN") or (side == "SELL" and struct_state.trend == "UP"):
-            effective_confidence *= 0.75  # penalise counter-trend, let high-conviction through
-            logger.debug(f"{symbol}: counter-trend {side} vs confirmed {struct_state.trend} — confidence penalised to {effective_confidence:.2f}")
+            logger.debug(f"{symbol}: skip counter-trend {side} vs confirmed {struct_state.trend}")
+            return False
 
     quantity, notional = calculate_position_size(
         capital, current_price, mode, trade_heat, leverage=lev,
@@ -746,35 +715,13 @@ async def _try_open_trade(
         if not mode_flags["live_enabled"]:
             logger.warning("Live trading disabled — enable via Settings page")
             return False
-        if mode == "FUTURES":
-            if side == "BUY":
-                result = await place_futures_market_buy(symbol, quantity, lev, use_testnet=mode_flags["use_testnet"])
-            else:
-                result = await place_futures_market_sell(symbol, quantity, lev, use_testnet=mode_flags["use_testnet"])
-            if not result.get("ok"):
-                if side == "SELL":
-                    # Cannot short on spot — no fallback for short positions
-                    logger.warning(f"Futures SHORT failed for {symbol}, no SPOT fallback: {result.get('error')}")
-                    return False
-                logger.warning(f"Futures order failed for {symbol}, falling back to SPOT: {result.get('error')}")
-                mode = "SPOT"
-                leverage = 1
-                quantity = quantity / lev  # margin-equivalent qty: don't spend full leveraged notional
-                # Recalculate SL/TP for SPOT (no leverage division)
-                stop_loss, take_profit = calculate_sl_tp_prices(
-                    current_price, "SPOT",
-                    side=side,
-                    sl_pct=params["stop_loss_percent"],
-                    tp_pct=params["take_profit_percent"],
-                    leverage=1,
-                    atr_pct=atr_for_tp,
-                )
-                result = await place_spot_market_buy(symbol, quantity, use_testnet=mode_flags["use_testnet"])
+        if side == "BUY":
+            result = await place_futures_market_buy(symbol, quantity, lev, use_testnet=mode_flags["use_testnet"])
         else:
-            if side == "BUY":
-                result = await place_spot_market_buy(symbol, quantity, use_testnet=mode_flags["use_testnet"])
-            else:
-                result = await place_spot_market_sell(symbol, quantity, use_testnet=mode_flags["use_testnet"])
+            result = await place_futures_market_sell(symbol, quantity, lev, use_testnet=mode_flags["use_testnet"])
+        if not result.get("ok"):
+            logger.warning(f"Futures {side} failed for {symbol}: {result.get('error')}")
+            return False
 
     if not result.get("ok"):
         error_msg = result.get("error", "")
@@ -984,6 +931,12 @@ async def run_trading_engine(
         "paper": mode_flags["paper"],
         "testnet": mode_flags["use_testnet"],
     })
+    # Clear stale command from previous session so executor doesn't immediately stop
+    stale_cmd = await redis.get(COMMAND_KEY)
+    if stale_cmd and stale_cmd != "confirmed":
+        logger.info(f"Clearing stale bot:command='{stale_cmd}' from previous session")
+        await redis.delete(COMMAND_KEY)
+
     logger.info("Trading engine ready — awaiting user confirmation to start trading")
 
     while not stop_event.is_set():
