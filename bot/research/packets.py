@@ -54,7 +54,13 @@ async def load_candles(symbol: str, timeframe: str, limit: int = 400) -> pd.Data
     return df.sort_values("open_time").reset_index(drop=True)
 
 
-def _build_from_frame(symbol: str, df_15m: pd.DataFrame, hour: datetime, now: datetime) -> dict[str, Any] | None:
+def _build_from_frame(
+    symbol: str,
+    df_15m: pd.DataFrame,
+    hour: datetime,
+    now: datetime,
+    df_1h: pd.DataFrame | None = None,
+) -> dict[str, Any] | None:
     if len(df_15m) < MIN_ROWS:
         return None
     df = add_indicators(df_15m)
@@ -104,15 +110,35 @@ def _build_from_frame(symbol: str, df_15m: pd.DataFrame, hour: datetime, now: da
     invalidation = hour_low if side == "bull" else hour_high
     invalidation_hit = close < hour_low if side == "bull" else close > hour_high
 
-    votes = 0.0
-    votes += 0.25 if (side == "bull" and close >= hour_open) or (side == "bear" and close < hour_open) else 0.0
-    votes += 0.25 if (side == "bull" and close >= ema21) or (side == "bear" and close <= ema21) else 0.0
-    votes += 0.20 if (side == "bull" and rsi >= 50) or (side == "bear" and rsi <= 50) else 0.0
-    votes += 0.15 if adx >= 18 else 0.0
-    votes += 0.15 if swept_low or swept_high else 0.0
-    confidence = max(0.35, min(0.85, 0.35 + votes))
+    # 5-factor confidence — raw 0–1, no clamp
+    # Each factor is independent; the sum is the confidence score.
+    sweep_score = 0.30 if (swept_low and side == "bull") or (swept_high and side == "bear") else 0.0
+    ema_hour_score = 0.20 if (
+        (side == "bull" and close >= ema21 and close >= hour_open) or
+        (side == "bear" and close < ema21 and close < hour_open)
+    ) else 0.0
+    rsi_score = 0.15 if (side == "bull" and rsi >= 55) or (side == "bear" and rsi <= 45) else 0.0
+    adx_score = 0.15 if adx >= 22 else 0.0
 
-    arm = bool(confidence >= 0.55 and not invalidation_hit)
+    # 1h structure confirmation
+    struct_score = 0.0
+    if df_1h is not None and not df_1h.empty and len(df_1h) >= 30:
+        try:
+            from bot.analysis.structure import classify_structure
+            h_state = classify_structure(df_1h, lookback=3)
+            if h_state.confirmed:
+                if (side == "bull" and h_state.trend == "UP") or (side == "bear" and h_state.trend == "DOWN"):
+                    struct_score = 0.20
+        except Exception:
+            pass
+
+    confidence = round(sweep_score + ema_hour_score + rsi_score + adx_score + struct_score, 4)
+
+    sweep_setup = setup in (
+        "15m sweep of hour low then reclaim",
+        "15m sweep of hour high then reject",
+    )
+    arm = bool(sweep_setup and confidence >= 0.65 and not invalidation_hit)
 
     return {
         "schema": 1,
@@ -122,7 +148,7 @@ def _build_from_frame(symbol: str, df_15m: pd.DataFrame, hour: datetime, now: da
         "pred_1h_close_side": side,
         "pred_1h_range": {"low": round(pred_low, 8), "high": round(pred_high, 8)},
         "invalidation": round(invalidation, 8),
-        "confidence": round(confidence, 4),
+        "confidence": confidence,
         "setup": setup,
         "features": {
             "rsi_15m": round(rsi, 2),
@@ -144,9 +170,10 @@ def _build_from_frame(symbol: str, df_15m: pd.DataFrame, hour: datetime, now: da
 async def build_packet(symbol: str, now: datetime | None = None) -> dict[str, Any] | None:
     now = now or datetime.now(timezone.utc)
     hour = hour_start_utc(now)
-    df = await load_candles(symbol, "15m", limit=400)
+    df_15m = await load_candles(symbol, "15m", limit=400)
+    df_1h = await load_candles(symbol, "1h", limit=50)
     try:
-        return _build_from_frame(symbol, df, hour, now)
+        return _build_from_frame(symbol, df_15m, hour, now, df_1h=df_1h)
     except Exception as exc:
         logger.debug(f"{symbol}: packet build failed ({exc})")
         return None

@@ -1,12 +1,17 @@
-"""Manager entry gate — trend alignment + researcher learning loop.
+"""Manager entry gate — trend alignment + researcher agreement filter.
 
-Futures only. Side comes from the manager and the market trend.
-The researcher adjusts confidence but does not veto an order.
+Futures only. Side comes from the manager (1h ML + market structure).
+The researcher packet is required for entry:
+  - missing or stale → skip
+  - agrees + armed   → confidence ×1.10, full size
+  - agrees + unarmed → confidence ×0.90, size ×0.70
+  - contradicts      → skip (never flip side)
+Override is disabled until the per-setup scorecard shows positive edge.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,7 +29,8 @@ class Decision:
     rules: dict[str, Any] | None = None
     venue: str = "FUTURES"
     side: str = ""
-    confidence_adj: float = 1.0  # multiplier the executor applies to confidence
+    confidence_adj: float = 1.0
+    size_adj: float = 1.0
 
 
 def _stale(packet: dict[str, Any], now: datetime) -> bool:
@@ -63,18 +69,16 @@ def compute_market_trend(
     Structure and EMA set the trend. The researcher packet is feedback only
     and cannot flip, veto, or invent a trend.
     """
-    # Only trust confirmed structure trends
     if structure and structure.confirmed and structure.trend == "UP":
         base_trend = "BULL"
     elif structure and structure.confirmed and structure.trend == "DOWN":
         base_trend = "BEAR"
     elif ema21 > 0 and ema50 > 0:
-        # Only trust EMA when separation is meaningful (>0.3%)
         ema_spread = abs(ema21 - ema50) / ema50 * 100
         if ema_spread >= 0.3:
             base_trend = "BULL" if ema21 > ema50 else "BEAR"
         else:
-            base_trend = "NONE"  # EMAs too close — no clear trend, let ML decide
+            base_trend = "NONE"
     else:
         base_trend = "NONE"
 
@@ -100,9 +104,6 @@ def get_aligned_action(
     """Return (FUTURES, side) or (SKIP, reason). Spot is not a venue."""
     if bot_prediction == "NONE":
         return "SKIP", "no_prediction"
-    # When ML disagrees with trend, follow the trend (the market is right)
-    # The confidence penalty will reduce position size for counter-trend signals
-    # Follow the trend when available; fall back to ML when no trend
     if market_trend != "NONE":
         direction = market_trend
     else:
@@ -135,6 +136,10 @@ async def should_enter(
     if packet and _stale(packet, now):
         packet = None
 
+    # Require a fresh researcher packet — no packet means no entry
+    if not packet or not settings.research_enabled:
+        return Decision(False, "no_research_packet", packet=None, rules=rules)
+
     bot_pred = compute_bot_prediction(predicted_change_pct, confidence)
     adx_15m = float(packet.get("adx", 0.0)) if packet else 0.0
 
@@ -149,43 +154,42 @@ async def should_enter(
     if venue == "SKIP":
         return Decision(False, f"alignment_skip:{side_or_reason}", packet=packet, rules=rules)
 
-    # Researcher override — 15m data is more current for day trading.
-    # When researcher strongly disagrees with the gate's side, trust it.
-    if packet and settings.research_enabled:
-        pkt_side_raw = packet.get("pred_1h_close_side", "")
-        pkt_conf = float(packet.get("confidence") or 0)
-        pkt_armed = packet.get("arm", False)
-        researcher_side = "BUY" if pkt_side_raw == "bull" else ("SELL" if pkt_side_raw == "bear" else "")
+    # Researcher agreement check — contradictions block, never flip side
+    pkt_side_raw = packet.get("pred_1h_close_side", "")
+    pkt_conf = float(packet.get("confidence") or 0)
+    pkt_armed = packet.get("arm", False)
+    researcher_side = "BUY" if pkt_side_raw == "bull" else ("SELL" if pkt_side_raw == "bear" else "")
 
-        if researcher_side and researcher_side != side_or_reason:
-            if pkt_armed and pkt_conf >= 0.70:
-                # Armed researcher with high confidence overrides gate side
-                side_or_reason = researcher_side
-            elif pkt_conf >= 0.80:
-                # Very confident unarmed researcher blocks contradicting trade
-                return Decision(False, f"researcher_veto:{pkt_side_raw}@{pkt_conf:.2f}",
-                                packet=packet, rules=rules)
+    if not researcher_side:
+        return Decision(False, "no_research_packet:no_side", packet=packet, rules=rules)
 
-    # Confidence adjustments — trend alignment + researcher.
+    if researcher_side != side_or_reason:
+        return Decision(
+            False,
+            f"researcher_contradicts:{pkt_side_raw}@{pkt_conf:.2f}",
+            packet=packet, rules=rules,
+        )
+
+    # Researcher agrees — armed gets a boost, unarmed gets a penalty + smaller size
+    if pkt_armed:
+        conf_adj_researcher = 1.10
+        size_adj = 1.0
+    else:
+        conf_adj_researcher = 0.90
+        size_adj = 0.70
+
+    # Trend alignment confidence multiplier
     conf_adj = 1.0
     if market != "NONE" and bot_pred == market:
-        conf_adj *= 1.15  # ML agrees with trend — high conviction
+        conf_adj *= 1.15
     elif market != "NONE" and bot_pred != market:
-        conf_adj *= 0.85  # ML disagrees — mild penalty (trend may be stale)
+        conf_adj *= 0.85
 
-    # Researcher packet adjustment
-    if packet and settings.research_enabled:
-        pkt_conf = float(packet.get("confidence") or 0)
-        pkt_side = packet.get("pred_1h_close_side", "")
-        want = "bull" if side_or_reason == "BUY" else "bear"
-        if pkt_side == want and pkt_conf >= 0.65:
-            conf_adj *= 1.15  # researcher agrees with conviction → strong boost
-        elif pkt_side == want:
-            conf_adj *= 1.05  # researcher agrees weakly → small boost
-        elif pkt_side and pkt_side != want and pkt_conf >= 0.75:
-            conf_adj *= 0.80  # researcher strongly disagrees → significant penalty
-        elif pkt_side and pkt_side != want:
-            conf_adj *= 0.90  # researcher disagrees → mild penalty
+    conf_adj *= conf_adj_researcher
 
-    return Decision(True, "aligned", packet=packet, rules=rules,
-                    venue="FUTURES", side=side_or_reason, confidence_adj=conf_adj)
+    return Decision(
+        True, "aligned",
+        packet=packet, rules=rules,
+        venue="FUTURES", side=side_or_reason,
+        confidence_adj=conf_adj, size_adj=size_adj,
+    )

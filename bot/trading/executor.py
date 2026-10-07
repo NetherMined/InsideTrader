@@ -134,8 +134,8 @@ async def _get_macro_trend(redis: aioredis.Redis) -> str:
 
     await redis.setex(_MACRO_TREND_CACHE_KEY, _MACRO_TREND_CACHE_TTL, trend)
     return trend
-_TRAIL_ACTIVATION_PCT = 12.0   # start trailing at 12% effective profit (2.4% price at 5x)
-_TRAIL_REVERSAL_PCT = 3.0      # close if price reverses 3% effective from peak
+_TRAIL_ACTIVATION_PCT = 1.0    # arm trail once effective profit clears fees (~1% covers round-trip at 5x)
+_TRAIL_REVERSAL_PCT = 0.5      # trail by 0.5% effective from peak
 _MIN_PROFIT_USD = 2.00         # never close a winning trade below $2 PnL (non-SL)
 _TP_TRAIL_PREFIX = "bot:tp_trail:"  # TP follower anchor per position
 _FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"  # SPOT / FUTURES / DYNAMIC
@@ -427,14 +427,54 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                             await redis.delete(tp_trail_key)
 
         if close_reason is None:
+            # Structure invalidation exit — primary mechanism replacing the 15m timeout
+            try:
+                pkt_raw = await redis.get(f"research:packet:{symbol}")
+                if pkt_raw:
+                    pkt = json.loads(pkt_raw)
+                    pkt_time_raw = pkt.get("packet_time")
+                    pkt_stale = True
+                    if pkt_time_raw:
+                        try:
+                            pkt_ts = datetime.fromisoformat(str(pkt_time_raw).replace("Z", "+00:00"))
+                            pkt_stale = (datetime.now(timezone.utc) - pkt_ts).total_seconds() / 60 > settings.research_stale_minutes
+                        except Exception:
+                            pass
+                    inv = pkt.get("invalidation")
+                    if not pkt_stale and inv is not None:
+                        inv = float(inv)
+                        if side == "BUY" and current_price < inv:
+                            close_reason = "structure_invalidation"
+                            logger.info(f"{symbol}: BUY invalidation — price ${current_price:.4f} below hour_low ${inv:.4f}")
+                        elif side == "SELL" and current_price > inv:
+                            close_reason = "structure_invalidation"
+                            logger.info(f"{symbol}: SELL invalidation — price ${current_price:.4f} above hour_high ${inv:.4f}")
+                    elif pkt_stale:
+                        # Fallback: 1h structure flip when packet is stale
+                        try:
+                            struct_state_close, _ = await _load_structure_cached(redis, symbol)
+                            if struct_state_close and struct_state_close.confirmed:
+                                if side == "BUY" and struct_state_close.trend == "DOWN":
+                                    close_reason = "structure_flip"
+                                    logger.info(f"{symbol}: stale packet + 1h confirmed DOWN — closing BUY")
+                                elif side == "SELL" and struct_state_close.trend == "UP":
+                                    close_reason = "structure_flip"
+                                    logger.info(f"{symbol}: stale packet + 1h confirmed UP — closing SELL")
+                        except Exception:
+                            pass
+            except Exception as _inv_exc:
+                logger.debug(f"{symbol}: invalidation check failed ({_inv_exc})")
+
+        if close_reason is None:
             opened_at = pos.get("opened_at")
             if opened_at is not None:
                 if isinstance(opened_at, datetime) and opened_at.tzinfo is None:
                     opened_at = opened_at.replace(tzinfo=timezone.utc)
                 minutes_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
-                if minutes_open >= params["negative_trade_timeout_minutes"] and pnl_usdt < 0 and effective_pnl_pct <= -0.5:
+                scratch_timeout = max(45, params.get("negative_trade_timeout_minutes", 45))
+                if minutes_open >= scratch_timeout and pnl_usdt < 0 and effective_pnl_pct <= -1.0:
                     close_reason = "negative_timeout"
-                    logger.info(f"{symbol}: closing after {minutes_open:.0f}min in loss (${pnl_usdt:.4f}, {effective_pnl_pct:.2f}%)")
+                    logger.info(f"{symbol}: scratch timeout {minutes_open:.0f}min (${pnl_usdt:.4f}, {effective_pnl_pct:.2f}%)")
                 elif minutes_open >= 120:  # day trading hard max: 2 hours
                     close_reason = "max_hold"
                     logger.info(f"{symbol}: max hold 2h reached after {minutes_open:.0f}min — closing at {effective_pnl_pct:+.2f}%")
@@ -506,6 +546,39 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 break
 
 
+async def _is_symbol_viable(redis: aioredis.Redis, symbol: str) -> bool:
+    """Return False for symbols with win rate <35% and negative net PnL over their last 20 trades."""
+    cache_key = f"bot:sym_viable:{symbol}"
+    cached = await redis.get(cache_key)
+    if cached is not None:
+        return cached == "1"
+    try:
+        from bot.db.connection import async_session
+        from sqlalchemy import text as _text
+        async with async_session() as session:
+            row = (await session.execute(_text("""
+                SELECT COUNT(*) as total,
+                       COUNT(CASE WHEN pnl_usdt > 0 THEN 1 END) as wins,
+                       COALESCE(SUM(pnl_usdt), 0) as net_pnl
+                FROM (
+                    SELECT pnl_usdt FROM trades
+                    WHERE symbol = :symbol AND status = 'CLOSED'
+                    ORDER BY closed_at DESC LIMIT 20
+                ) t
+            """), {"symbol": symbol})).mappings().first()
+        viable = True
+        if row and int(row["total"]) >= 10:
+            win_rate = int(row["wins"]) / int(row["total"])
+            net_pnl = float(row["net_pnl"])
+            if win_rate < 0.35 and net_pnl < 0:
+                viable = False
+                logger.info(f"{symbol}: viability block — win_rate={win_rate:.0%} net=${net_pnl:.2f} ({row['total']} trades)")
+    except Exception:
+        viable = True
+    await redis.setex(cache_key, 1800, "1" if viable else "0")
+    return viable
+
+
 async def _try_open_trade(
     pair: RankedPair,
     open_symbols: list[str],
@@ -525,8 +598,12 @@ async def _try_open_trade(
         logger.debug(f"{symbol}: cooldown active — skipping")
         return False
 
-    # Minimum prediction gate — skip near-zero predictions
-    if abs(pair.predicted_change_pct) < 0.10:
+    # Symbol viability check — block persistent losers (win rate <35%, negative PnL over last 20 trades)
+    if not await _is_symbol_viable(redis, symbol):
+        return False
+
+    # Minimum prediction gate — must predict at least 1% move to cover fees and TP distance
+    if abs(pair.predicted_change_pct) < 1.0:
         return False
 
     # Per-symbol learning — throttle size on poor performers, block only the worst
@@ -676,6 +753,11 @@ async def _try_open_trade(
         logger.info(f"{symbol}: researcher throttle global={global_mult:.2f} sym={sym_mult:.2f} -> {combined_mult:.2f}")
     trade_heat *= combined_mult
 
+    # Unarmed researcher packet → reduce position size
+    if decision.size_adj < 1.0:
+        trade_heat *= decision.size_adj
+        logger.debug(f"{symbol}: unarmed packet size_adj={decision.size_adj:.2f}")
+
     can_open, reason = await risk.can_open_trade(
         symbol, open_symbols, params, capital, open_heat_usdt,
         symbol_heat_usdt=symbol_heat_usdt, trade_heat_usdt=trade_heat,
@@ -738,10 +820,17 @@ async def _try_open_trade(
             atr_pct=atr_for_tp,
         )
 
-    # Minimum TP distance gate — reject if TP is less than 0.5% away from entry
+    # TP distance gate — must be at least 1.2% from entry to clear round-trip fees
     tp_dist_pct = abs(take_profit - current_price) / current_price * 100
-    if tp_dist_pct < 0.5:
-        logger.debug(f"{symbol}: skip — TP only {tp_dist_pct:.2f}% from entry (need >=0.5%)")
+    if tp_dist_pct < 1.2:
+        logger.debug(f"{symbol}: skip — TP only {tp_dist_pct:.2f}% from entry (need >=1.2%)")
+        return False
+
+    # Fee-based required edge: round-trip taker fee × leverage + 0.8pp slippage margin
+    round_trip_cost_pct = settings.taker_fee_rate * 2 * 100
+    required_edge_pct = round_trip_cost_pct * lev + 0.8
+    if tp_dist_pct < required_edge_pct:
+        logger.debug(f"{symbol}: skip — TP {tp_dist_pct:.2f}% below required edge {required_edge_pct:.2f}%")
         return False
 
     # R:R gate — hard 2.5:1 minimum for zone-based entries only
@@ -1144,7 +1233,8 @@ async def run_trading_engine(
                         f"Fees: ${fee_check['fees_usdt']:.2f}, Net: ${fee_check['net_pnl_usdt']:.2f}"
                     )
 
-            await _maybe_switch_trade(ranked_store, positions, capital, redis, risk, params, funding_rates=funding_rates, regime_result=None)
+            # Trade-switch disabled — closing a losing position to free a slot locks in losses
+            # (71 switches in history were all losses, -$51 net). Re-enable only if scorecard improves.
 
             positions = await get_open_positions()
             open_symbols = [p["symbol"] for p in positions]

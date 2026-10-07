@@ -13,7 +13,10 @@ from bot.data.fetcher import fetch_recent
 from bot.research import PACKET_HOUR_KEY, loads
 from bot.research.packets import build_packet, hour_start_utc, persist_packet
 from bot.research.patcher import apply_tighten_if_allowed, load_rules, maybe_patch, write_pending
-from bot.research.scorer import load_closed_1h, manager_action_for_hour, persist_review, score_packet, score_structure
+from bot.research.scorer import (
+    load_closed_1h, manager_action_for_hour, persist_review, score_packet, score_structure,
+    update_setup_scorecard,
+)
 
 
 def _seconds_to_next_15m(now: datetime | None = None) -> float:
@@ -83,6 +86,30 @@ async def _score_closed_hour(redis, pairs: list[str], closed_hour: datetime) -> 
                 logger.debug(f"{symbol}: structure scoring in loop failed ({exc})")
 
         await persist_review(redis, review)
+
+        # Update per-setup scorecard with trade PnL if manager entered
+        if action == "enter":
+            try:
+                from bot.db.connection import async_session
+                from sqlalchemy import text as _text
+                async with async_session() as _sess:
+                    _trade = (await _sess.execute(
+                        _text("""
+                            SELECT pnl_usdt FROM trades
+                            WHERE symbol = :symbol AND status = 'CLOSED'
+                              AND opened_at >= :start AND opened_at < :start + interval '1 hour'
+                            ORDER BY opened_at ASC LIMIT 1
+                        """),
+                        {"symbol": symbol, "start": closed_hour},
+                    )).mappings().first()
+                if _trade and _trade["pnl_usdt"] is not None:
+                    await update_setup_scorecard(
+                        redis, symbol, packet.get("setup", "unknown"),
+                        followed=True, pnl_usdt=float(_trade["pnl_usdt"]),
+                    )
+            except Exception as _exc:
+                logger.debug(f"{symbol}: scorecard update failed ({_exc})")
+
         reviews.append(review)
     if not reviews:
         return
@@ -168,10 +195,8 @@ def _symbol_multiplier(matches: int, total: int) -> float:
     if total < 3:
         return 1.0
     rate = matches / total
-    if rate < 0.30:
-        return 0.50
     if rate < 0.45:
-        return 0.70
+        return 0.50
     if rate < 0.55:
         return 0.85
     return 1.0

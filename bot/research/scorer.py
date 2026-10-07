@@ -181,6 +181,44 @@ async def score_structure(
     return labels
 
 
+_SCORECARD_KEY = "research:scorecard:{}:{}"
+_SCORECARD_TTL = 7 * 24 * 3600
+
+
+async def update_setup_scorecard(redis, symbol: str, setup: str, followed: bool, pnl_usdt: float) -> None:
+    """Track per-symbol per-setup PnL for followed vs skipped packets (rolling 50)."""
+    import json as _json
+    key = _SCORECARD_KEY.format(symbol, setup or "unknown")
+    raw = await redis.get(key)
+    data = _json.loads(raw) if raw else {"followed": [], "skipped": []}
+    bucket = "followed" if followed else "skipped"
+    data[bucket].append(round(pnl_usdt, 4))
+    data[bucket] = data[bucket][-50:]
+    await redis.setex(key, _SCORECARD_TTL, _json.dumps(data))
+
+
+async def get_setup_scorecard(redis, symbol: str, setup: str) -> dict:
+    """Return scorecard for this symbol+setup. override_allowed only when sample>=30 and followed beats skipped."""
+    import json as _json
+    key = _SCORECARD_KEY.format(symbol, setup or "unknown")
+    raw = await redis.get(key)
+    if not raw:
+        return {"override_allowed": False, "sample": 0}
+    data = _json.loads(raw)
+    followed = data.get("followed", [])
+    skipped = data.get("skipped", [])
+    sample = len(followed)
+    followed_avg = sum(followed) / len(followed) if followed else 0.0
+    skipped_avg = sum(skipped) / len(skipped) if skipped else 0.0
+    override_allowed = sample >= 30 and followed_avg > skipped_avg
+    return {
+        "override_allowed": override_allowed,
+        "sample": sample,
+        "followed_avg_pnl": round(followed_avg, 4),
+        "skipped_avg_pnl": round(skipped_avg, 4),
+    }
+
+
 async def persist_review(redis, review: dict[str, Any]) -> None:
     hour = review.get("hour_start")
     symbol = review.get("symbol")
