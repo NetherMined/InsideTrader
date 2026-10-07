@@ -77,14 +77,23 @@ def calculate_sl_tp_prices(
 ) -> tuple[float, float]:
     """Return (stop_loss_price, take_profit_price).
 
-    TP stretches to 1.5x ATR when available, floored at 3% and capped at 6%.
+    Both SL and TP stretch with ATR so volatile pairs get wider stops.
+    SL is capped so leveraged loss never exceeds 6%.
+    TP: 1.5x ATR floored at config default, capped at 8%.
     """
-    _sl_pct = sl_pct if sl_pct is not None else settings.stop_loss_percent
+    _lev = leverage if leverage is not None else settings.futures_leverage
+    _default_sl = sl_pct if sl_pct is not None else settings.stop_loss_percent
+    _default_tp = tp_pct if tp_pct is not None else settings.take_profit_percent
+    # Max SL price move so leveraged loss stays under ~4%
+    # At 5x: 0.76% price → 3.8% leveraged + slippage ≈ 4%
+    max_sl_pct = max(0.5, 3.8 / max(_lev, 1))
 
     if atr_pct is not None and atr_pct > 0:
-        _tp_pct = max(3.0, min(6.0, atr_pct * 1.5))
+        _sl_pct = max(_default_sl, min(max_sl_pct, atr_pct * 1.2))
+        _tp_pct = max(_default_tp, min(8.0, atr_pct * 1.5))
     else:
-        _tp_pct = tp_pct if tp_pct is not None else settings.take_profit_percent
+        _sl_pct = min(_default_sl, max_sl_pct)
+        _tp_pct = _default_tp
 
     if side == "BUY":
         stop_loss = entry_price * (1 - _sl_pct / 100)

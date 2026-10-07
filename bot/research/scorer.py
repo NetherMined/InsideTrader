@@ -194,3 +194,41 @@ async def persist_review(redis, review: dict[str, Any]) -> None:
     except Exception as exc:
         logger.debug(f"error roll write failed: {exc}")
         _ = raw
+    try:
+        import json
+        forecast = review.get("forecast") or {}
+        manager = review.get("manager") or {}
+        async with async_session() as session:
+            async with session.begin():
+                await session.execute(
+                    text("""
+                        INSERT INTO hour_reviews
+                            (symbol, hour_start, side_ok, range_ok,
+                             invalidation_hit, manager_action, followed_advice,
+                             labels, usefulness, actual)
+                        VALUES
+                            (:symbol, :hour_start, :side_ok, :range_ok,
+                             :invalidation_hit, :manager_action, :followed_advice,
+                             CAST(:labels AS jsonb), :usefulness, CAST(:actual AS jsonb))
+                        ON CONFLICT (symbol, hour_start) DO UPDATE
+                        SET side_ok = EXCLUDED.side_ok,
+                            range_ok = EXCLUDED.range_ok,
+                            labels = EXCLUDED.labels,
+                            usefulness = EXCLUDED.usefulness,
+                            actual = EXCLUDED.actual
+                    """),
+                    {
+                        "symbol": symbol,
+                        "hour_start": datetime.fromisoformat(hour) if isinstance(hour, str) else hour,
+                        "side_ok": forecast.get("side_ok"),
+                        "range_ok": forecast.get("range_ok"),
+                        "invalidation_hit": forecast.get("invalidation_hit"),
+                        "manager_action": manager.get("action"),
+                        "followed_advice": manager.get("followed_advice"),
+                        "labels": json.dumps(review.get("labels")),
+                        "usefulness": review.get("usefulness"),
+                        "actual": json.dumps(review.get("actual_1h")),
+                    },
+                )
+    except Exception as exc:
+        logger.warning(f"{symbol}: DB persist_review failed ({exc})")

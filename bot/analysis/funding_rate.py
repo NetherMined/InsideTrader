@@ -44,10 +44,11 @@ async def fetch_funding_rates(symbols: list[str]) -> dict[str, dict]:
         await exchange.load_markets()
         # Fetch funding rates in batches of 20 (Binance limit)
         for i in range(0, len(symbols), 20):
-            batch = symbols[i:i + 20]
+            batch = [s if ":USDT" in s else f"{s}:USDT" for s in symbols[i:i + 20]]
             try:
-                funding_data = await exchange.fetch_funding_rates(batch)
+                funding_data = await exchange.fetch_funding_rates([s for s in batch if s in exchange.markets])
                 for symbol, data in funding_data.items():
+                    symbol = symbol.split(":")[0]
                     rate = data.get("fundingRate", 0.0)
                     next_funding = data.get("nextFundingRate", 0.0)
                     predicted = data.get("predictedFundingRate", None)

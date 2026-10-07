@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     trading_mode: str = "FUTURES"
     trading_pairs: str = "AUTO"
     analysis_timeframe: str = "1h"
-    futures_leverage: int = 2
+    futures_leverage: int = 5
     starting_capital_usdt: float = 100.0
 
     futures_confidence_threshold: float = 0.55
@@ -37,6 +37,7 @@ class Settings(BaseSettings):
 
     heat_limit_pct: float = 40.0
     max_single_symbol_heat_pct: float = 10.0
+    max_trade_margin_usdt: float = 10.0  # max margin per position (~$2 max loss at 4%)
 
     min_rr_ratio: float = 2.5
     zone_sl_max_pct: float = 3.0
@@ -49,7 +50,7 @@ class Settings(BaseSettings):
     research_enabled: bool = True
     research_timeframe: str = "15m"
     research_min_confidence: float = 0.55
-    require_15m_confirm: bool = True
+    require_15m_confirm: bool = False
     allow_1h_only_if_research_stale: bool = False
     research_stale_minutes: int = 20
     patch_window_hours: int = 10
@@ -115,4 +116,4 @@ settings = Settings()
 
 def get_mode_limits(mode: str) -> dict:
     """Futures-only. Spot is disabled; mode argument is ignored."""
-    return {"max_simultaneous": 4}
+    return {"max_simultaneous": 8}

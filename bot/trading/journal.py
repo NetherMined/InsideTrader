@@ -135,7 +135,7 @@ async def close_position(
                             gross_pnl_usdt = :gross_pnl,
                             status = 'CLOSED',
                             closed_at = :closed_at,
-                            extra = CAST(:extra AS jsonb)
+                            extra = COALESCE(extra, '{}'::jsonb) || CAST(:close_extra AS jsonb)
                         WHERE id = :trade_id
                     """),
                     {
@@ -143,7 +143,7 @@ async def close_position(
                         "estimated_fee": estimated_fee_usdt,
                         "gross_pnl": gross_pnl_usdt,
                         "closed_at": now, "trade_id": trade_id,
-                        "extra": json.dumps({"close_reason": close_reason}),
+                        "close_extra": json.dumps({"close_reason": close_reason}),
                     },
                 )
             else:
@@ -155,7 +155,7 @@ async def close_position(
                             pnl_percent = :pnl_pct,
                             status = 'CLOSED',
                             closed_at = :closed_at,
-                            extra = CAST(:extra AS jsonb)
+                            extra = COALESCE(extra, '{}'::jsonb) || CAST(:close_extra AS jsonb)
                         WHERE id = (
                             SELECT id FROM trades
                             WHERE symbol = :symbol AND status = 'OPEN'
@@ -166,7 +166,7 @@ async def close_position(
                     {
                         "exit_price": exit_price, "pnl_usdt": pnl_usdt, "pnl_pct": pnl_pct,
                         "closed_at": now, "symbol": symbol,
-                        "extra": json.dumps({"close_reason": close_reason}),
+                        "close_extra": json.dumps({"close_reason": close_reason}),
                     },
                 )
 

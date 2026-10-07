@@ -11,6 +11,9 @@ from sqlalchemy import text
 
 from bot.analysis.indicators import add_indicators, MIN_ROWS
 from bot.db.connection import async_session
+import json
+from datetime import datetime as _dt
+
 from bot.research import dumps, packet_hour_key, packet_key
 
 
@@ -155,3 +158,39 @@ async def persist_packet(redis, packet: dict[str, Any]) -> None:
     raw = dumps(packet)
     await redis.setex(packet_key(symbol), 4 * 3600, raw)
     await redis.setex(packet_hour_key(symbol, hour), 7 * 24 * 3600, raw)
+    try:
+        async with async_session() as session:
+            async with session.begin():
+                await session.execute(
+                    text("""
+                        INSERT INTO research_packets
+                            (symbol, hour_start, packet_time, pred_side,
+                             pred_low, pred_high, invalidation, confidence,
+                             setup, features, arm, raw)
+                        VALUES
+                            (:symbol, :hour_start, :packet_time, :pred_side,
+                             :pred_low, :pred_high, :invalidation, :confidence,
+                             :setup, CAST(:features AS jsonb), :arm, CAST(:raw AS jsonb))
+                        ON CONFLICT (symbol, hour_start, packet_time) DO UPDATE
+                        SET pred_side = EXCLUDED.pred_side,
+                            confidence = EXCLUDED.confidence,
+                            arm = EXCLUDED.arm,
+                            raw = EXCLUDED.raw
+                    """),
+                    {
+                        "symbol": symbol,
+                        "hour_start": _dt.fromisoformat(packet["hour_start"]),
+                        "packet_time": _dt.fromisoformat(packet["packet_time"]),
+                        "pred_side": packet["pred_1h_close_side"],
+                        "pred_low": (packet.get("pred_1h_range") or {}).get("low"),
+                        "pred_high": (packet.get("pred_1h_range") or {}).get("high"),
+                        "invalidation": packet.get("invalidation"),
+                        "confidence": packet["confidence"],
+                        "setup": packet.get("setup"),
+                        "features": json.dumps(packet.get("features")),
+                        "arm": packet.get("arm", False),
+                        "raw": raw,
+                    },
+                )
+    except Exception as exc:
+        logger.warning(f"{symbol}: DB persist_packet failed ({exc})")

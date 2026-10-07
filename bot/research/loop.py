@@ -1,8 +1,9 @@
-"""15m researcher loop. Never places orders."""
+"""15m researcher loop. Feedback only. Never places or blocks orders."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
 from loguru import logger
@@ -85,12 +86,7 @@ async def _score_closed_hour(redis, pairs: list[str], closed_hour: datetime) -> 
         reviews.append(review)
     if not reviews:
         return
-    rules = await load_rules(redis)
-    patch = maybe_patch(reviews, rules)
-    if patch:
-        patch = await apply_tighten_if_allowed(redis, patch, rules)
-        await write_pending(redis, patch)
-        logger.info(f"Researcher patch {patch.get('status')}: {patch.get('because')}")
+    await write_trade_feedback(redis, reviews)
 
 
 async def run_researcher_loop(
@@ -139,3 +135,139 @@ async def run_researcher_loop(
             await asyncio.wait_for(stop_event.wait(), timeout=_seconds_to_next_15m())
         except asyncio.TimeoutError:
             pass
+
+
+async def _scan_keys(redis, pattern: str) -> list:
+    found = []
+    cursor = 0
+    while True:
+        cursor, batch = await redis.scan(cursor=cursor, match=pattern, count=50)
+        found.extend(batch)
+        if cursor == 0 or cursor == "0":
+            break
+    return found
+
+
+def _size_multiplier(match_rate: float, sample: int) -> float:
+    """Throttle size when recent entries disagreed with the market. Never zero."""
+    if sample < 4:
+        return 1.0
+    if match_rate < 0.40:
+        return 0.60
+    if match_rate < 0.50:
+        return 0.80
+    return 1.0
+
+
+_SYM_KEY = "research:sym:{}"
+_SYM_TTL = 24 * 3600  # per-symbol stats expire after 24h of no updates
+
+
+def _symbol_multiplier(matches: int, total: int) -> float:
+    """Per-symbol size multiplier based on that symbol's match history."""
+    if total < 3:
+        return 1.0
+    rate = matches / total
+    if rate < 0.30:
+        return 0.50
+    if rate < 0.45:
+        return 0.70
+    if rate < 0.55:
+        return 0.85
+    return 1.0
+
+
+async def _update_symbol_stats(redis, symbol: str, matched: bool) -> float:
+    """Append one entry result to the per-symbol rolling window (last 10). Returns multiplier."""
+    key = _SYM_KEY.format(symbol)
+    raw = await redis.get(key)
+    history = json.loads(raw) if raw else {"results": []}
+    history["results"].append(1 if matched else 0)
+    history["results"] = history["results"][-10:]  # rolling window
+    matches = sum(history["results"])
+    total = len(history["results"])
+    mult = _symbol_multiplier(matches, total)
+    history["matches"] = matches
+    history["total"] = total
+    history["multiplier"] = mult
+    await redis.setex(key, _SYM_TTL, json.dumps(history))
+    return mult
+
+
+async def get_symbol_multiplier(redis, symbol: str) -> float:
+    """Read the per-symbol size multiplier. Returns 1.0 if unknown."""
+    raw = await redis.get(_SYM_KEY.format(symbol))
+    if not raw:
+        return 1.0
+    try:
+        data = json.loads(raw)
+        return float(data.get("multiplier", 1.0))
+    except Exception:
+        return 1.0
+
+
+async def write_trade_feedback(redis, reviews: list[dict]) -> None:
+    """Score the hour, update global + per-symbol multipliers, and log the researcher's view."""
+    past = []
+    sym_updates = []
+    for review in reviews:
+        manager = review.get("manager") or {}
+        forecast = review.get("forecast") or {}
+        action = manager.get("action")
+        labels = review.get("labels") or []
+        matched = bool(forecast.get("side_ok"))
+        symbol = review.get("symbol")
+        past.append({
+            "symbol": symbol,
+            "action": action,
+            "matched_market": matched,
+            "usefulness": review.get("usefulness"),
+            "labels": labels[:6],
+        })
+        if action == "enter" and symbol:
+            mult = await _update_symbol_stats(redis, symbol, matched)
+            sym_updates.append((symbol, matched, mult))
+
+    entered = [p for p in past if p.get("action") == "enter"]
+    sample = len(entered)
+    matched_n = sum(1 for p in entered if p["matched_market"])
+    match_rate = (matched_n / sample) if sample else 1.0
+    multiplier = _size_multiplier(match_rate, sample)
+
+    forward = []
+    try:
+        keys = await _scan_keys(redis, "research:packet:*")
+        for key in keys[:12]:
+            raw = await redis.get(key)
+            if not raw:
+                continue
+            pkt = loads(raw)
+            if not pkt:
+                continue
+            forward.append({
+                "symbol": pkt.get("symbol"),
+                "market_side": pkt.get("pred_1h_close_side"),
+                "setup": pkt.get("setup"),
+                "confidence": pkt.get("confidence"),
+            })
+    except Exception as exc:
+        logger.debug(f"forward feedback failed ({exc})")
+
+    payload = {
+        "role": "learning_loop",
+        "blocks_entries": False,
+        "match_rate": round(match_rate, 3),
+        "sample": sample,
+        "size_multiplier": multiplier,
+        "per_symbol": {s: {"matched": m, "mult": mu} for s, m, mu in sym_updates},
+        "past_vs_market": past,
+        "forward": forward,
+    }
+    await redis.set("research:feedback", json.dumps(payload))
+    await redis.setex("research:size_multiplier", 3 * 3600, str(multiplier))
+
+    sym_log = ", ".join(f"{s}={mu:.2f}" for s, _, mu in sym_updates) if sym_updates else "none"
+    logger.info(
+        f"Researcher feedback: {matched_n}/{sample} matched, "
+        f"global={multiplier:.2f}, per-symbol: [{sym_log}]"
+    )
