@@ -1056,9 +1056,9 @@ async def run_trading_engine(
         "paper": mode_flags["paper"],
         "testnet": mode_flags["use_testnet"],
     })
-    # Clear stale command from previous session so executor doesn't immediately stop
+    # Always clear any stale command from previous session — require fresh confirmation
     stale_cmd = await redis.get(COMMAND_KEY)
-    if stale_cmd and stale_cmd != "confirmed":
+    if stale_cmd:
         logger.info(f"Clearing stale bot:command='{stale_cmd}' from previous session")
         await redis.delete(COMMAND_KEY)
 
