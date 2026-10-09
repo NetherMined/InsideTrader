@@ -733,30 +733,8 @@ async def _try_open_trade(
             symbol_heat_usdt += p_heat
 
     trade_heat = calculate_trade_heat(capital, open_heat_usdt, symbol_heat_usdt, params)
-    # Cap margin per trade (R250 cap — limits absolute loss per position)
-    if settings.max_trade_margin_usdt > 0:
-        trade_heat = min(trade_heat, settings.max_trade_margin_usdt)
-    # Researcher learning loop: global + per-symbol size throttle
-    try:
-        mult_raw = await redis.get("research:size_multiplier")
-        global_mult = float(mult_raw) if mult_raw else 1.0
-        global_mult = min(1.0, max(0.5, global_mult))
-    except Exception:
-        global_mult = 1.0
-    try:
-        from bot.research.loop import get_symbol_multiplier
-        sym_mult = await get_symbol_multiplier(redis, symbol)
-    except Exception:
-        sym_mult = 1.0
-    combined_mult = max(0.3, global_mult * sym_mult)
-    if combined_mult < 1.0:
-        logger.info(f"{symbol}: researcher throttle global={global_mult:.2f} sym={sym_mult:.2f} -> {combined_mult:.2f}")
-    trade_heat *= combined_mult
-
-    # Unarmed researcher packet → reduce position size
-    if decision.size_adj < 1.0:
-        trade_heat *= decision.size_adj
-        logger.debug(f"{symbol}: unarmed packet size_adj={decision.size_adj:.2f}")
+    # Experiments: one position, full capital as margin. Do not apply the
+    # dollar cap or the researcher size throttle.
 
     can_open, reason = await risk.can_open_trade(
         symbol, open_symbols, params, capital, open_heat_usdt,

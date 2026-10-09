@@ -1,8 +1,8 @@
 """Heat-based position sizing.
 
-40% portfolio heat cap. Heat = cash (spot) + margin (futures).
-Per-trade heat = heat_limit / max_simultaneous.
-Single symbol capped at 10% of equity.
+Experiments: one position, full capital as futures margin.
+Heat limit and per-symbol cap are 100%. Per-trade heat is the free heat,
+which is the whole account when nothing is open.
 """
 
 from loguru import logger

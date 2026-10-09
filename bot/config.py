@@ -35,9 +35,9 @@ class Settings(BaseSettings):
     negative_trade_timeout_minutes: int = 60
     taker_fee_rate: float = 0.0004
 
-    heat_limit_pct: float = 40.0
-    max_single_symbol_heat_pct: float = 10.0
-    max_trade_margin_usdt: float = 10.0  # max margin per position (~$2 max loss at 4%)
+    heat_limit_pct: float = 100.0
+    max_single_symbol_heat_pct: float = 100.0
+    max_trade_margin_usdt: float = 0.0  # 0 = no dollar cap; one trade uses full capital as margin
 
     min_rr_ratio: float = 2.5
     zone_sl_max_pct: float = 3.0
@@ -116,4 +116,4 @@ settings = Settings()
 
 def get_mode_limits(mode: str) -> dict:
     """Futures-only. Spot is disabled; mode argument is ignored."""
-    return {"max_simultaneous": 8}
+    return {"max_simultaneous": 1}

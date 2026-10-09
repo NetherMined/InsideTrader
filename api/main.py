@@ -32,7 +32,7 @@ import ccxt.async_support as ccxt
 from api.config import settings
 from api.db import get_session, check_db, async_session as _db_session
 
-_HEAT_LIMIT_PCT = 40.0
+_HEAT_LIMIT_PCT = 100.0
 
 # re-export for inline use in endpoints
 _starting_capital = settings.starting_capital_usdt
@@ -763,7 +763,7 @@ class SetTradeLimitsRequest(BaseModel):
 
 
 def _mode_limits(mode: str) -> dict:
-    return {"max_daily_trades": 16, "max_simultaneous": 4}
+    return {"max_daily_trades": 16, "max_simultaneous": 1}
 
 
 async def _read_trade_limits(redis) -> TradeLimitsResponse:
