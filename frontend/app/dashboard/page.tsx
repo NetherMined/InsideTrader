@@ -7,7 +7,7 @@ import { PositionChart } from '@/components/PositionCharts';
 import { fmt, fmtPct, fmtPrice } from '@/lib/utils';
 import type { BotStatus, Position, LivePrice, Candle, PnlPeriodStats, MarketSentiment } from '@/lib/types';
 import { useCurrency } from '@/lib/currency';
-import { ExternalLink } from 'lucide-react';
+import { ExternalLink, X } from 'lucide-react';
 import { StartupModal } from '@/components/StartupModal';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -341,6 +341,20 @@ export default function DashboardPage() {
 
   const [startupDismissed, setStartupDismissed] = useState(false);
   const [showStartupModal, setShowStartupModal] = useState(false);
+  const [closingId, setClosingId] = useState<number | null>(null);
+
+  const closePosition = async (id: number) => {
+    if (!confirm('Close this position at market price?')) return;
+    setClosingId(id);
+    try {
+      await api.closePosition(id);
+      await loadPositions();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setClosingId(null);
+    }
+  };
 
   const freeCapital = status?.capital_usdt ?? 0;
   const futuresBalance = status?.futures_usdt ?? 0;
@@ -511,12 +525,17 @@ export default function DashboardPage() {
                 <th className="text-right pb-2 font-medium">Invested</th>
                 <th className="text-right pb-2 font-medium">P&L</th>
                 <th className="text-right pb-2 font-medium">Next Action</th>
+                <th className="text-right pb-2 font-medium"></th>
               </tr>
             </thead>
             <tbody>
               {positions.map((p) => (
-                <tr key={p.id} style={{ borderTop: '1px solid #1a1a1a' }}>
-                  <td className="py-1.5 font-medium">{p.symbol}</td>
+                <tr
+                  key={p.id}
+                  className={p.unrealized_pnl > 0 ? 'row-profit' : p.unrealized_pnl < 0 ? 'row-loss' : undefined}
+                  style={{ borderTop: '1px solid #1a1a1a' }}
+                >
+                  <td className="py-1.5 pl-2 font-medium">{p.symbol}</td>
                   <td className="py-1.5" style={{ color: p.side === 'BUY' ? '#0ecb81' : '#f6465d' }}>
                     {p.side}
                   </td>
@@ -551,6 +570,17 @@ export default function DashboardPage() {
                       const color = isBreakEven ? '#f0b90b' : nearSL ? '#f6465d' : nearTP ? '#0ecb81' : '#555';
                       return <span style={{ color, fontSize: '11px' }}>{label}</span>;
                     })()}
+                  </td>
+                  <td className="py-1.5 text-right pr-2">
+                    <button
+                      onClick={() => closePosition(p.id)}
+                      disabled={closingId === p.id}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium disabled:opacity-40"
+                      style={{ background: 'rgba(246,70,93,0.15)', color: '#f6465d' }}
+                    >
+                      <X size={11} />
+                      {closingId === p.id ? 'Closing' : 'Close'}
+                    </button>
                   </td>
                 </tr>
               ))}
