@@ -62,6 +62,18 @@ export function BotControls({ status, onUpdate, onRequestStartup }: Props) {
     await send('resume');
   };
 
+  const resetLossResponse = async () => {
+    setLoading(true);
+    try {
+      await api.resetLossResponse();
+      setTimeout(onUpdate, 800);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const resetKillSwitch = async () => {
     setLoading(true);
     try {
@@ -82,8 +94,23 @@ export function BotControls({ status, onUpdate, onRequestStartup }: Props) {
   const defensive = state === 'defensive' || status?.defensive_mode;
   const killSwitch = state === 'kill_switch' || (status?.kill_switch && !defensive);
 
+  const lossLevel = status?.loss_level ?? 0;
+
   return (
     <div className="flex items-center gap-2">
+      {lossLevel > 0 && !killSwitch && (
+        <button
+          onClick={resetLossResponse}
+          disabled={loading}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-opacity disabled:opacity-50"
+          style={{ background: 'rgba(240,185,11,0.15)', color: '#f0b90b', border: '1px solid rgba(240,185,11,0.3)', cursor: 'pointer' }}
+          title={`${status?.loss_consecutive ?? 0} losses in a row. Click to clear the pause and restore full size`}
+        >
+          <AlertTriangle size={13} />
+          {lossLevel === 2 ? `LOSS PAUSE ${Math.ceil(status?.loss_pause_minutes_left ?? 0)}m` : 'HALF SIZE'}
+          <RotateCcw size={11} style={{ marginLeft: 2 }} />
+        </button>
+      )}
       {defensive && (
         <button
           onClick={resetKillSwitch}

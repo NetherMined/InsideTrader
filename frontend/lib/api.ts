@@ -1,8 +1,9 @@
 import type {
   Health, Market, Prediction, Position, Trade,
   BotStatus, Backtest, LivePrice, Candle,
-  TradeLimits, PnlPeriodStats, ModeBreakdown,
+  TradeLimits, PnlPeriodStats, ModeBreakdown, RecoveryStats,
   AccountBalances, LiveMode, MarketSentiment, StartupStatus,
+  SymbolOverview, ManualOpenResult,
 } from './types';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -54,6 +55,8 @@ export const api = {
     post<{ ok: boolean; command: string }>(`/api/v1/bot/command/${cmd}`),
   resetKillSwitch: () =>
     post<{ ok: boolean; message: string }>('/api/v1/bot/reset-killswitch'),
+  resetLossResponse: () =>
+    post<{ ok: boolean; message: string }>('/api/v1/bot/reset-loss-response'),
   emergencyStop: () =>
     post<{ ok: boolean; message: string }>('/api/v1/bot/emergency-stop'),
   getCurrency: () =>
@@ -77,12 +80,19 @@ export const api = {
   pnlStats: (period: '1h' | '24h' | '7d' | '30d' | 'all') =>
     get<PnlPeriodStats>(`/api/v1/stats/pnl?period=${period}`),
   modeBreakdown: () => get<ModeBreakdown>('/api/v1/stats/mode-breakdown'),
+  recoveryStats: (hours = 24) => get<RecoveryStats>(`/api/v1/stats/recovery?hours=${hours}`),
   getAccountBalances: () => get<AccountBalances>('/api/v1/account/balances'),
   convertAllToUsdt: () => post<{ ok: boolean; conversions: Array<{ asset: string; ok: boolean; usdt_received?: number; error?: string }> }>('/api/v1/account/convert-all'),
   getLiveMode: () => get<LiveMode>('/api/v1/settings/live-mode'),
   setLiveMode: (mode: Partial<LiveMode>) => postJson<LiveMode>('/api/v1/settings/live-mode', mode),
   marketSentiment: () => get<MarketSentiment>('/api/v1/market/sentiment'),
   startupStatus: () => get<StartupStatus>('/api/v1/bot/startup-status'),
+  symbolOverview: (symbol: string) =>
+    get<SymbolOverview>(`/api/v1/symbol/overview?symbol=${encodeURIComponent(symbol)}`),
+  manualOpen: (symbol: string, side: 'BUY' | 'SELL') =>
+    postJson<{ ok: boolean; request_id: string; message: string }>('/api/v1/positions/manual-open', { symbol, side }),
+  manualOpenResult: (requestId: string) =>
+    get<ManualOpenResult>(`/api/v1/positions/manual-open/${requestId}`),
   confirmStartup: () => post<{ ok: boolean; message: string }>('/api/v1/bot/confirm-startup'),
 };
 

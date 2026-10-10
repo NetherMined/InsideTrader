@@ -31,7 +31,17 @@ class Settings(BaseSettings):
     confidence_threshold: float = 0.70
     stop_loss_percent: float = 2.0
     take_profit_percent: float = 3.0
-    daily_loss_limit_percent: float = 10.0
+    daily_loss_limit_percent: float = 20.0
+    momentum_filter_enabled: bool = True
+    momentum_flat_pct: float = 1.0
+    cost_gate_enabled: bool = True
+    max_roundtrip_cost_pct: float = 0.20
+    loss_pause_after: int = 3
+    loss_pause_minutes: int = 30
+    loss_pause_max_minutes: int = 120
+    loss_half_size_after: int = 3
+    loss_material_pct: float = 0.5
+    loss_state_ttl_hours: int = 6
     negative_trade_timeout_minutes: int = 60
     taker_fee_rate: float = 0.0004
 

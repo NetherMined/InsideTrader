@@ -186,3 +186,30 @@ class RulePatch(Base):
     decided_at = Column(DateTime(timezone=True))
     decided_by = Column(String(16))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class TradeRecovery(Base):
+    __tablename__ = "trade_recovery"
+
+    trade_id = Column(Integer, primary_key=True, autoincrement=False)
+    symbol = Column(String(30), nullable=False, index=True)
+    side = Column(String(10), nullable=False)
+    close_reason = Column(String(40))
+    entry_price = Column(Float, nullable=False)
+    exit_price = Column(Float)
+    pnl_usdt = Column(Float)
+    closed_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    hold_seconds = Column(Integer)
+    minutes_observed = Column(Integer, default=0)
+    final = Column(Boolean, default=False)
+    best_fav_pct = Column(Float)
+    worst_adv_pct = Column(Float)
+    best_fav_usdt = Column(Float)
+    recovered_to_entry = Column(Boolean, default=False)
+    minutes_to_entry = Column(Integer)
+    hit_tp = Column(Boolean, default=False)
+    minutes_to_tp = Column(Integer)
+    hold_pnl_5m = Column(Float)
+    hold_pnl_15m = Column(Float)
+    hold_pnl_60m = Column(Float)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())

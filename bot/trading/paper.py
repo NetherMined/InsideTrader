@@ -16,6 +16,20 @@ PAPER_CAPITAL_KEY = "paper:capital_usdt"
 
 _SLIP_FUTURES = 0.0010  # 0.10% slippage on futures fills
 _SLIP_SPOT    = 0.0005  # 0.05% slippage on spot fills
+SLIP_FUTURES_MAX = 0.0015  # cap on modeled per-symbol futures slippage (position sizing reserves for this)
+SLIP_FUTURES_MIN = 0.0001
+
+
+async def _fill_slip(redis: aioredis.Redis, symbol: str, mode: str, side: str, notional: float) -> float:
+    """Slippage fraction for one fill. Futures use the live order book; falls back to the flat default."""
+    if mode != "FUTURES":
+        return _SLIP_SPOT
+    from bot.trading.costs import get_slippage
+    est = await get_slippage(redis, symbol, notional)
+    if not est or est.get("thin"):
+        return SLIP_FUTURES_MAX if est else _SLIP_FUTURES
+    pct = est["buy_pct"] if side == "buy" else est["sell_pct"]
+    return min(SLIP_FUTURES_MAX, max(SLIP_FUTURES_MIN, pct / 100))
 
 
 async def get_paper_capital(redis: aioredis.Redis) -> float:
@@ -46,7 +60,7 @@ async def simulate_buy(
     mode: str,
     leverage: int = 1,
 ) -> dict:
-    slip = _SLIP_FUTURES if mode == "FUTURES" else _SLIP_SPOT
+    slip = await _fill_slip(redis, symbol, mode, "buy", quantity * price)
     fill_price = price * (1 + slip)  # BUY fills at slightly higher price
     notional = quantity * fill_price
     capital = await get_paper_capital(redis)
@@ -85,12 +99,12 @@ async def simulate_sell(
     mode: str,
     leverage: int = 1,
 ) -> dict:
-    slip = _SLIP_FUTURES if mode == "FUTURES" else _SLIP_SPOT
+    slip = await _fill_slip(redis, symbol, mode, "sell", quantity * exit_price)
     fill_exit = exit_price * (1 - slip)  # SELL close fills at slightly lower price
     raw_pnl_pct = (fill_exit / entry_price - 1) * 100
     effective_pnl_pct = raw_pnl_pct * leverage
     notional = quantity * entry_price
-    pnl_usdt = notional * effective_pnl_pct / 100
+    pnl_usdt = notional * raw_pnl_pct / 100  # notional already carries the leverage
     margin = notional / leverage if mode == "FUTURES" else notional
     close_fee = abs(quantity * fill_exit * settings.taker_fee_rate)
     pnl_usdt -= close_fee
@@ -123,7 +137,7 @@ async def simulate_sell_short(
     mode: str,
     leverage: int = 1,
 ) -> dict:
-    slip = _SLIP_FUTURES if mode == "FUTURES" else _SLIP_SPOT
+    slip = await _fill_slip(redis, symbol, mode, "sell", quantity * price)
     fill_price = price * (1 - slip)  # SHORT opens at slightly lower price
     notional = quantity * fill_price
     margin = notional / leverage if mode == "FUTURES" else notional
@@ -162,12 +176,12 @@ async def simulate_buy_back(
     mode: str,
     leverage: int = 1,
 ) -> dict:
-    slip = _SLIP_FUTURES if mode == "FUTURES" else _SLIP_SPOT
+    slip = await _fill_slip(redis, symbol, mode, "buy", quantity * exit_price)
     fill_exit = exit_price * (1 + slip)  # covering short buys at slightly higher price
     raw_pnl_pct = (entry_price / fill_exit - 1) * 100
     effective_pnl_pct = raw_pnl_pct * leverage
     notional = quantity * entry_price
-    pnl_usdt = notional * effective_pnl_pct / 100
+    pnl_usdt = notional * raw_pnl_pct / 100  # notional already carries the leverage
     margin = notional / leverage if mode == "FUTURES" else notional
     close_fee = abs(quantity * fill_exit * settings.taker_fee_rate)
     pnl_usdt -= close_fee

@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { useCurrency } from '@/lib/currency';
-import type { BotStatus, PnlPeriodStats, Trade, Position, ModeBreakdown } from '@/lib/types';
+import type { BotStatus, PnlPeriodStats, Trade, Position, ModeBreakdown, RecoveryStats } from '@/lib/types';
+import RecoverySection from '@/components/RecoverySection';
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
   CartesianGrid,
@@ -105,9 +106,10 @@ export default function UserStatsPage() {
   const [startingCapital, setStartingCapital] = useState<number>(0);
   const [modeBreakdown, setModeBreakdown] = useState<ModeBreakdown | null>(null);
   const [allTrades, setAllTrades] = useState<Trade[]>([]);
+  const [recovery, setRecovery] = useState<RecoveryStats | null>(null);
 
   const load = async () => {
-    const [s, a, t, trades, cap, pos, mb, at] = await Promise.allSettled([
+    const [s, a, t, trades, cap, pos, mb, at, rec] = await Promise.allSettled([
       api.botStatus(),
       api.pnlStats('all'),
       api.pnlStats('24h'),
@@ -116,7 +118,9 @@ export default function UserStatsPage() {
       api.positions(),
       api.modeBreakdown(),
       api.trades('CLOSED'),
+      api.recoveryStats(24),
     ]);
+    if (rec.status === 'fulfilled') setRecovery(rec.value);
     if (s.status === 'fulfilled') setStatus(s.value);
     if (a.status === 'fulfilled') setAllTime(a.value);
     if (t.status === 'fulfilled') setToday(t.value);
@@ -507,6 +511,11 @@ export default function UserStatsPage() {
             </div>
           )}
         </div>
+      </div>
+
+      <div>
+        <SectionTitle>Exit Recovery</SectionTitle>
+        <RecoverySection data={recovery} display={display} />
       </div>
 
       <div>

@@ -15,6 +15,7 @@ Endpoints:
 
 import asyncio
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -185,6 +186,10 @@ async def get_top_markets(
     return [MarketResponse(**dict(r)) for r in rows]
 
 
+_CANDLE_TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "1d")
+_CANDLE_TIMEFRAME_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+
+
 @app.get("/api/v1/candles", response_model=list[CandleResponse])
 async def get_candles(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -192,6 +197,11 @@ async def get_candles(
     timeframe: str = Query("1h"),
     limit: int = Query(200, le=1000),
 ):
+    if timeframe not in _CANDLE_TIMEFRAMES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"timeframe must be one of {', '.join(_CANDLE_TIMEFRAMES)}",
+        )
     result = await session.execute(
         text("""
             SELECT symbol, timeframe,
@@ -206,12 +216,25 @@ async def get_candles(
     )
     rows = result.mappings().all()
 
+    # Symbols outside the bot's tracked set have old rows in the DB; only trust
+    # stored candles when the newest one is recent, otherwise use Binance below.
+    if rows and rows[0]["open_time"]:
+        newest = rows[0]["open_time"]
+        if newest.tzinfo is None:
+            newest = newest.replace(tzinfo=timezone.utc)
+        max_age = _CANDLE_TIMEFRAME_SECONDS[timeframe] * 3
+        if (datetime.now(timezone.utc) - newest).total_seconds() > max_age:
+            rows = []
+
     if rows:
         return [
             CandleResponse(
                 symbol=r["symbol"],
                 timeframe=r["timeframe"],
-                open_time=r["open_time"].isoformat() if r["open_time"] else "",
+                open_time=(
+                    r["open_time"].replace(tzinfo=timezone.utc).isoformat()
+                    if r["open_time"] else ""
+                ),
                 open=r["open"],
                 high=r["high"],
                 low=r["low"],
@@ -221,21 +244,28 @@ async def get_candles(
             for r in rows
         ]
 
-    # Fallback: fetch directly from Binance public REST API
+    # Fallback: Binance public REST. USDM futures first (the bot trades futures-only
+    # symbols that spot does not list), then spot.
     binance_symbol = symbol.replace("/", "")
-    interval_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
-    interval = interval_map.get(timeframe, "1h")
-    url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            klines = resp.json()
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"No candles found for {symbol}: {e}")
-
+    klines = None
+    last_error = ""
+    for base in (
+        "https://fapi.binance.com/fapi/v1/klines",
+        "https://api.binance.com/api/v3/klines",
+    ):
+        url = f"{base}?symbol={binance_symbol}&interval={timeframe}&limit={limit}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                klines = resp.json()
+            if klines:
+                break
+        except Exception as e:
+            last_error = str(e)
     if not klines:
-        raise HTTPException(status_code=404, detail=f"No candles found for {symbol}")
+        raise HTTPException(status_code=404, detail=f"No candles found for {symbol}: {last_error}")
+    klines = list(reversed(klines))
 
     return [
         CandleResponse(
@@ -500,6 +530,10 @@ class BotStatusResponse(BaseModel):
     defensive_mode: bool = False
     started_with_usdt: float = 0.0
     futures_usdt: float = 0.0
+    loss_level: int = 0
+    loss_consecutive: int = 0
+    loss_pause_minutes_left: float = 0.0
+    loss_size_multiplier: float = 1.0
 
 
 @app.get("/api/v1/positions", response_model=list[PositionResponse])
@@ -565,6 +599,11 @@ async def get_bot_status():
         daily_pnl = float(await redis.get("bot:daily_pnl") or 0.0)
         kill = (await redis.get("bot:kill_switch") or "0") == "1"
         defensive = (await redis.get("bot:defensive_mode") or "0") == "1"
+        loss_consec = int(await redis.get("bot:loss_consec") or 0)
+        loss_pause_raw = await redis.get("bot:loss_pause_until")
+        loss_pause_left = max(0.0, (float(loss_pause_raw) - datetime.now(timezone.utc).timestamp()) / 60) if loss_pause_raw else 0.0
+        loss_half = loss_consec >= 3
+        loss_level = 2 if loss_pause_left > 0 else (1 if loss_half else 0)
         redis_open_count = int(await redis.get("bot:open_count") or 0)
         open_count = state_data.get("open_trades", redis_open_count)
         paper_raw = await redis.get(_LIVE_MODE_KEYS["paper_trading_mode"])
@@ -654,6 +693,10 @@ async def get_bot_status():
             defensive_mode=defensive,
             started_with_usdt=round(started_with_usdt, 2),
             futures_usdt=round(futures_usdt, 2),
+            loss_level=loss_level,
+            loss_consecutive=loss_consec,
+            loss_pause_minutes_left=round(loss_pause_left, 1),
+            loss_size_multiplier=0.5 if loss_half else 1.0,
         )
     finally:
         await redis.aclose()
@@ -917,8 +960,19 @@ async def reset_killswitch():
     try:
         await redis.set("bot:kill_switch", "0")
         await redis.set("bot:defensive_mode", "0")
-        await redis.delete("bot:command")
-        return {"ok": True, "message": "Defensive mode cleared — normal strategy resuming"}
+        await redis.delete("bot:command", "bot:loss_consec", "bot:loss_pause_until")
+        return {"ok": True, "message": "Kill switch and loss pause cleared — trading resuming"}
+    finally:
+        await redis.aclose()
+
+
+@app.post("/api/v1/bot/reset-loss-response")
+async def reset_loss_response():
+    """Clear the loss-streak pause and size reduction without touching the kill switch."""
+    redis = await get_redis()
+    try:
+        await redis.delete("bot:loss_consec", "bot:loss_pause_until")
+        return {"ok": True, "message": "Loss pause cleared — entries and full size resume"}
     finally:
         await redis.aclose()
 
@@ -1216,7 +1270,7 @@ async def hard_reset(session: Annotated[AsyncSession, Depends(get_session)]):
             "paper:capital_usdt": str(restore_capital),
         }
         await redis.mset(reset_keys)
-        await redis.delete("bot:recovery_mode")
+        await redis.delete("bot:recovery_mode", "bot:loss_consec", "bot:loss_pause_until")
         await redis.delete("bot:session_start_capital")
 
         # Clear per-symbol cooldowns, TP trail anchors, and regime cache
@@ -1248,6 +1302,156 @@ async def close_position_manually(
     try:
         await redis.set(f"close_position:{position_id}", "1", ex=300)
         return {"ok": True, "message": f"Position {position_id} ({row['symbol']}) queued for close"}
+    finally:
+        await redis.aclose()
+
+
+class SymbolOverviewResponse(BaseModel):
+    symbol: str
+    price: PriceResponse | None
+    prediction: PredictionResponse | None
+    suggested_side: str | None
+    positions: list[PositionResponse]
+    trades: list[TradeResponse]
+    paper: bool
+
+
+@app.get("/api/v1/symbol/overview", response_model=SymbolOverviewResponse)
+async def get_symbol_overview(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    symbol: str = Query(..., description="Trading pair, e.g. BTC/USDT"),
+):
+    """Everything the live-price modal needs for one symbol."""
+    redis = await get_redis()
+    try:
+        raw_price = await redis.get(f"price:{symbol}")
+        paper_raw = await redis.get("bot:paper_trading_mode")
+    finally:
+        await redis.aclose()
+    price = None
+    if raw_price:
+        try:
+            price = PriceResponse(**json.loads(raw_price))
+        except Exception:
+            price = None
+
+    pred_row = (
+        await session.execute(
+            text("""
+                SELECT symbol,
+                       prediction_date AT TIME ZONE 'UTC' AS prediction_date,
+                       current_price, target_price,
+                       predicted_change_pct, confidence,
+                       mode_recommendation, features
+                FROM predictions
+                WHERE symbol = :symbol
+                ORDER BY prediction_date DESC
+                LIMIT 1
+            """),
+            {"symbol": symbol},
+        )
+    ).mappings().first()
+    prediction = None
+    suggested_side = None
+    if pred_row:
+        prediction = PredictionResponse(
+            symbol=pred_row["symbol"],
+            prediction_date=pred_row["prediction_date"].isoformat() if pred_row["prediction_date"] else "",
+            current_price=pred_row["current_price"],
+            target_price=pred_row["target_price"],
+            predicted_change_pct=pred_row["predicted_change_pct"],
+            confidence=pred_row["confidence"],
+            mode_recommendation=pred_row["mode_recommendation"],
+            features=pred_row["features"],
+        )
+        suggested_side = "BUY" if pred_row["predicted_change_pct"] > 0 else "SELL"
+
+    pos_rows = (
+        await session.execute(
+            text("""
+                SELECT id, symbol, side, mode, entry_price, current_price,
+                       quantity, leverage, stop_loss_price, take_profit_price,
+                       unrealized_pnl, paper_trade,
+                       opened_at AT TIME ZONE 'UTC' AS opened_at
+                FROM positions
+                WHERE symbol = :symbol
+                ORDER BY opened_at DESC
+            """),
+            {"symbol": symbol},
+        )
+    ).mappings().all()
+    trade_rows = (
+        await session.execute(
+            text("""
+                SELECT id, symbol, side, mode, entry_price, exit_price,
+                       quantity, leverage, pnl_usdt, pnl_percent, status, paper_trade,
+                       opened_at AT TIME ZONE 'UTC' AS opened_at,
+                       closed_at AT TIME ZONE 'UTC' AS closed_at
+                FROM trades
+                WHERE symbol = :symbol AND (archived = false OR archived IS NULL)
+                ORDER BY opened_at DESC
+                LIMIT 20
+            """),
+            {"symbol": symbol},
+        )
+    ).mappings().all()
+
+    def _iso(r):
+        return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(r).items()}
+
+    return SymbolOverviewResponse(
+        symbol=symbol,
+        price=price,
+        prediction=prediction,
+        suggested_side=suggested_side,
+        positions=[PositionResponse(**_iso(r)) for r in pos_rows],
+        trades=[TradeResponse(**_iso(r)) for r in trade_rows],
+        paper=(paper_raw == "true") if paper_raw is not None else settings.paper_trading_mode,
+    )
+
+
+class ManualOpenRequest(BaseModel):
+    symbol: str
+    side: str
+
+
+@app.post("/api/v1/positions/manual-open")
+async def manual_open_position(req: ManualOpenRequest):
+    """Queue a manual entry. The bot executor opens it through the normal trade path."""
+    side = req.side.upper()
+    if side not in ("BUY", "SELL"):
+        raise HTTPException(status_code=422, detail="side must be BUY or SELL")
+
+    redis = await get_redis()
+    try:
+        if not await redis.exists(f"price:{req.symbol}"):
+            raise HTTPException(status_code=404, detail=f"No live price for {req.symbol}")
+        request_id = uuid.uuid4().hex
+        payload = {
+            "id": request_id,
+            "symbol": req.symbol,
+            "side": side,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await redis.set(
+            f"manual_open:result:{request_id}",
+            json.dumps({"status": "pending"}),
+            ex=300,
+        )
+        await redis.rpush("manual_open:queue", json.dumps(payload))
+        return {"ok": True, "request_id": request_id, "message": f"{side} {req.symbol} queued"}
+    finally:
+        await redis.aclose()
+
+
+@app.get("/api/v1/positions/manual-open/{request_id}")
+async def manual_open_result(request_id: str):
+    redis = await get_redis()
+    try:
+        raw = await redis.get(f"manual_open:result:{request_id}")
+        if not raw:
+            raise HTTPException(status_code=404, detail="Request not found or expired")
+        return json.loads(raw)
     finally:
         await redis.aclose()
 
@@ -1345,6 +1549,55 @@ async def get_mode_breakdown():
         logger.error(f"mode breakdown error: {e}")
 
     return ModeBreakdownResponse(spot=spot, futures=futures)
+
+
+@app.get("/api/v1/stats/recovery")
+async def get_recovery_stats(hours: int = Query(24, ge=1, le=720)):
+    """Post-exit recovery data from the 1m researcher, grouped by close reason."""
+    by_reason: list[dict] = []
+    recent: list[dict] = []
+    try:
+        async with _db_session() as session:
+            rows = (await session.execute(text("""
+                SELECT COALESCE(close_reason, 'unknown') AS close_reason,
+                       COUNT(*) AS trades,
+                       COUNT(*) FILTER (WHERE recovered_to_entry) AS recovered,
+                       COUNT(*) FILTER (WHERE hit_tp) AS hit_tp,
+                       COUNT(*) FILTER (WHERE hold_pnl_60m IS NOT NULL AND hold_pnl_60m > pnl_usdt) AS held_better_60m,
+                       COUNT(*) FILTER (WHERE hold_pnl_60m IS NOT NULL) AS with_60m,
+                       AVG(best_fav_pct) AS avg_best_fav_pct,
+                       AVG(worst_adv_pct) AS avg_worst_adv_pct,
+                       SUM(pnl_usdt) AS actual_pnl,
+                       SUM(hold_pnl_5m) AS hold_pnl_5m,
+                       SUM(hold_pnl_15m) AS hold_pnl_15m,
+                       SUM(hold_pnl_60m) AS hold_pnl_60m,
+                       SUM(pnl_usdt) FILTER (WHERE hold_pnl_60m IS NOT NULL) AS actual_pnl_60m
+                FROM trade_recovery
+                WHERE closed_at >= NOW() - make_interval(hours => :hours)
+                GROUP BY 1
+                ORDER BY trades DESC
+            """), {"hours": hours})).mappings().all()
+            for r in rows:
+                by_reason.append({
+                    k: (round(float(v), 4) if isinstance(v, float) or hasattr(v, "as_tuple") else v)
+                    for k, v in r.items()
+                })
+            recent_rows = (await session.execute(text("""
+                SELECT trade_id, symbol, side, close_reason, pnl_usdt, closed_at, hold_seconds,
+                       minutes_observed, final, best_fav_pct, worst_adv_pct, recovered_to_entry,
+                       minutes_to_entry, hit_tp, hold_pnl_5m, hold_pnl_15m, hold_pnl_60m
+                FROM trade_recovery
+                WHERE closed_at >= NOW() - make_interval(hours => :hours)
+                ORDER BY closed_at DESC
+                LIMIT 40
+            """), {"hours": hours})).mappings().all()
+            for r in recent_rows:
+                item = dict(r)
+                item["closed_at"] = item["closed_at"].isoformat() if item["closed_at"] else None
+                recent.append(item)
+    except Exception as e:
+        logger.error(f"recovery stats error: {e}")
+    return {"hours": hours, "by_reason": by_reason, "recent": recent}
 
 
 

@@ -89,6 +89,10 @@ export interface BotStatus {
   defensive_mode?: boolean;
   started_with_usdt?: number;
   futures_usdt?: number;
+  loss_level?: number;
+  loss_consecutive?: number;
+  loss_pause_minutes_left?: number;
+  loss_size_multiplier?: number;
 }
 
 export interface Candle {
@@ -162,6 +166,48 @@ export interface ModeBreakdown {
   futures: ModeStats;
 }
 
+export interface RecoveryReasonStats {
+  close_reason: string;
+  trades: number;
+  recovered: number;
+  hit_tp: number;
+  held_better_60m: number;
+  with_60m: number;
+  avg_best_fav_pct: number | null;
+  avg_worst_adv_pct: number | null;
+  actual_pnl: number | null;
+  actual_pnl_60m: number | null;
+  hold_pnl_5m: number | null;
+  hold_pnl_15m: number | null;
+  hold_pnl_60m: number | null;
+}
+
+export interface RecoveryTrade {
+  trade_id: number;
+  symbol: string;
+  side: string;
+  close_reason: string | null;
+  pnl_usdt: number | null;
+  closed_at: string | null;
+  hold_seconds: number | null;
+  minutes_observed: number;
+  final: boolean;
+  best_fav_pct: number | null;
+  worst_adv_pct: number | null;
+  recovered_to_entry: boolean;
+  minutes_to_entry: number | null;
+  hit_tp: boolean;
+  hold_pnl_5m: number | null;
+  hold_pnl_15m: number | null;
+  hold_pnl_60m: number | null;
+}
+
+export interface RecoveryStats {
+  hours: number;
+  by_reason: RecoveryReasonStats[];
+  recent: RecoveryTrade[];
+}
+
 export interface AssetBalance {
   asset: string;
   free: number;
@@ -215,4 +261,19 @@ export interface MarketSentiment {
   strategy: string;
   estimated_daily_profit_usdt: number;
   estimated_daily_profit_pct: number;
+}
+
+export interface SymbolOverview {
+  symbol: string;
+  price: LivePrice | null;
+  prediction: Prediction | null;
+  suggested_side: 'BUY' | 'SELL' | null;
+  positions: Position[];
+  trades: Trade[];
+  paper: boolean;
+}
+
+export interface ManualOpenResult {
+  status: 'pending' | 'opened' | 'rejected';
+  reason?: string;
 }

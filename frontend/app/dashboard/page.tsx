@@ -9,6 +9,7 @@ import type { BotStatus, Position, LivePrice, Candle, PnlPeriodStats, MarketSent
 import { useCurrency } from '@/lib/currency';
 import { ExternalLink, X } from 'lucide-react';
 import { StartupModal } from '@/components/StartupModal';
+import { SymbolModal } from '@/components/SymbolModal';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
 function StatCard({
@@ -252,6 +253,7 @@ export default function DashboardPage() {
   const [pnlHistory, setPnlHistory] = useState<{ t: string; pnl: number }[]>([]);
   const [candles, setCandles] = useState<Record<string, Candle[]>>({});
   const [clock, setClock] = useState('');
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const loadStatus = async () => {
@@ -368,6 +370,9 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6 space-y-6">
+      {selectedSymbol && (
+        <SymbolModal symbol={selectedSymbol} onClose={() => setSelectedSymbol(null)} />
+      )}
       {showStartupModal && (
         <StartupModal
           onConfirmed={() => { setShowStartupModal(false); setStartupDismissed(true); loadStatus(); }}
@@ -403,10 +408,18 @@ export default function DashboardPage() {
           sub={undefined}
         />
         <StatCard
-          label="Kill Switch"
-          value={status?.kill_switch ? 'ACTIVE' : 'OK'}
-          sub="Trips at -10%"
-          positive={!status?.kill_switch}
+          label="Loss Protection"
+          value={
+            status?.kill_switch
+              ? 'HALTED'
+              : (status?.loss_level ?? 0) === 2
+                ? `PAUSED ${Math.ceil(status?.loss_pause_minutes_left ?? 0)}m`
+                : (status?.loss_level ?? 0) === 1
+                  ? 'HALF SIZE'
+                  : 'OK'
+          }
+          sub={`Loss streak ${status?.loss_consecutive ?? 0} · halts at -20% daily`}
+          positive={!status?.kill_switch && (status?.loss_level ?? 0) === 0}
         />
         <HeatCard
           heatLimitPct={status?.heat_limit_pct ?? 40}
@@ -473,13 +486,19 @@ export default function DashboardPage() {
           <div className="text-sm font-semibold mb-3">Live Prices</div>
           <div className="space-y-1.5 max-h-[168px] overflow-y-auto">
             {prices.slice(0, 10).map((p) => (
-              <div key={p.symbol} className="flex items-center justify-between text-xs">
+              <button
+                type="button"
+                key={p.symbol}
+                onClick={() => setSelectedSymbol(p.symbol)}
+                className="w-full flex items-center justify-between text-xs px-1.5 py-1 rounded cursor-pointer hover:bg-white/10 focus-visible:bg-white/10 focus:outline-none transition-colors"
+                title={`View ${p.symbol} details and open a position`}
+              >
                 <span className="font-medium">{p.symbol}</span>
                 <span>{fmtPrice(p.price)}</span>
                 <span style={{ color: p.change_pct >= 0 ? '#0ecb81' : '#f6465d' }}>
                   {fmtPct(p.change_pct)}
                 </span>
-              </div>
+              </button>
             ))}
             {prices.length === 0 && (
               <div className="text-xs" style={{ color: '#848e9c' }}>

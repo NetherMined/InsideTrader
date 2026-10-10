@@ -7,6 +7,7 @@ which is the whole account when nothing is open.
 
 from loguru import logger
 from bot.config import settings
+from bot.trading.paper import SLIP_FUTURES_MAX
 
 MIN_NOTIONAL_FUTURES = 35.0
 MIN_NOTIONAL_SPOT = 10.0
@@ -50,7 +51,10 @@ def calculate_position_size(
     _leverage = leverage if leverage is not None else settings.futures_leverage
 
     if mode == "FUTURES":
-        margin = trade_heat
+        # Margin plus the entry fee and slippage must fit in the account, otherwise a
+        # full-capital trade is rejected at the order step (paper and live alike).
+        entry_cost_rate = _leverage * (settings.taker_fee_rate + SLIP_FUTURES_MAX)
+        margin = min(trade_heat, capital_usdt / (1 + entry_cost_rate))
         notional = margin * _leverage
     else:
         notional = trade_heat

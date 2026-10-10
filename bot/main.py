@@ -27,6 +27,7 @@ from bot.data.stream import poll_prices, check_redis
 from bot.analysis.trainer import run_analysis, force_retrain_models
 from bot.trading.executor import run_trading_engine
 from bot.research.loop import run_researcher_loop
+from bot.research.recovery import run_recovery_loop
 
 LOG_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
@@ -207,6 +208,7 @@ async def main() -> None:
         asyncio.create_task(_guarded("hourly_refresh", hourly_refresh(pairs, redis, stop_event, ranked_store))),
         asyncio.create_task(_guarded("periodic_retrain", periodic_retrain(pairs, stop_event))),
         asyncio.create_task(_guarded("researcher", run_researcher_loop(ranked_store, redis, stop_event))),
+        asyncio.create_task(_guarded("recovery_researcher", run_recovery_loop(stop_event))),
     ]
     try:
         await asyncio.gather(*tasks)

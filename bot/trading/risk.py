@@ -36,6 +36,8 @@ FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"
 HEAT_LIMIT_KEY = "bot:heat_limit_pct"
 OPEN_HEAT_KEY = "bot:open_heat_usdt"
 FREE_HEAT_KEY = "bot:free_heat_usdt"
+LOSS_CONSEC_KEY = "bot:loss_consec"
+LOSS_PAUSE_KEY = "bot:loss_pause_until"
 
 DEFENSIVE_PARAMS_OVERRIDE = {
     "mode": "FUTURES",
@@ -65,6 +67,7 @@ class RiskManager:
             await self._redis.set(KILL_KEY, "0")
             await self._redis.set(DEFENSIVE_KEY, "0")
             await self._redis.set(DAILY_TRADE_COUNT_KEY, "0")
+            await self.clear_loss_response()
             logger.info(f"New trading day: {today} — daily stats reset")
 
     async def get_daily_pnl(self) -> float:
@@ -94,6 +97,50 @@ class RiskManager:
         await self._redis.set(DAILY_PNL_KEY, "0.0")
         await self._redis.set(DAILY_PNL_USDT_KEY, "0.0")
         logger.info("Kill switch manually reset — daily P&L counters cleared")
+
+    async def clear_loss_response(self) -> None:
+        await self._redis.delete(LOSS_CONSEC_KEY, LOSS_PAUSE_KEY)
+
+    async def get_loss_response(self) -> dict:
+        """Graduated loss response state: normal, half-size, or paused."""
+        consec = int(await self._redis.get(LOSS_CONSEC_KEY) or 0)
+        pause_raw = await self._redis.get(LOSS_PAUSE_KEY)
+        now = datetime.now(timezone.utc).timestamp()
+        pause_until = float(pause_raw) if pause_raw else 0.0
+        paused = pause_until > now
+        half = consec >= settings.loss_half_size_after
+        return {
+            "consecutive_losses": consec,
+            "paused": paused,
+            "pause_until": datetime.fromtimestamp(pause_until, timezone.utc).isoformat() if paused else None,
+            "pause_minutes_left": round((pause_until - now) / 60, 1) if paused else 0.0,
+            "size_multiplier": 0.5 if half else 1.0,
+            "level": 2 if paused else (1 if half else 0),
+        }
+
+    async def get_size_multiplier(self) -> float:
+        return (await self.get_loss_response())["size_multiplier"]
+
+    async def record_loss_response(self, pnl_usdt: float, capital_usdt: float) -> None:
+        """Count consecutive material losses, pausing entries once the streak is long enough."""
+        material = -(capital_usdt * settings.loss_material_pct / 100) if capital_usdt > 0 else -1.0
+        ttl = settings.loss_state_ttl_hours * 3600
+        if pnl_usdt <= material:
+            consec = await self._redis.incr(LOSS_CONSEC_KEY)
+            await self._redis.expire(LOSS_CONSEC_KEY, ttl)
+            if consec >= settings.loss_pause_after:
+                extra = consec - settings.loss_pause_after
+                minutes = min(settings.loss_pause_minutes * (2 ** extra), settings.loss_pause_max_minutes)
+                until = datetime.now(timezone.utc).timestamp() + minutes * 60
+                await self._redis.setex(LOSS_PAUSE_KEY, int(minutes * 60) + 60, str(until))
+                logger.warning(
+                    f"Loss response: {consec} material losses in a row — new entries paused {minutes:.0f}min, "
+                    f"size x{0.5 if consec >= settings.loss_half_size_after else 1.0}"
+                )
+        elif pnl_usdt > 0:
+            if await self._redis.get(LOSS_CONSEC_KEY):
+                logger.info("Loss response: winning trade — loss streak cleared")
+            await self._redis.delete(LOSS_CONSEC_KEY, LOSS_PAUSE_KEY)
 
     async def is_defensive_mode(self) -> bool:
         val = await self._redis.get(DEFENSIVE_KEY)
@@ -195,11 +242,20 @@ class RiskManager:
         open_heat_usdt: float,
         symbol_heat_usdt: float = 0.0,
         trade_heat_usdt: float = 0.0,
+        manual: bool = False,
     ) -> tuple[bool, str]:
         await self._reset_if_new_day()
 
         if await self.is_kill_switch_active():
             return False, "Kill switch active — emergency stop"
+
+        if not manual:
+            loss = await self.get_loss_response()
+            if loss["paused"]:
+                return False, (
+                    f"Loss pause — {loss['consecutive_losses']} losses in a row, "
+                    f"entries resume in {loss['pause_minutes_left']:.0f}min"
+                )
 
         cmd = await self._redis.get(COMMAND_KEY)
         if cmd in ("stop", "pause"):
@@ -244,6 +300,7 @@ class RiskManager:
     ) -> bool:
         """Record closed trade P&L. Returns True if kill switch was triggered."""
         await self._reset_if_new_day()
+        await self.record_loss_response(pnl_usdt, capital_usdt)
 
         val = float(await self._redis.get(DAILY_PNL_KEY) or 0.0)
         new_val = val + pnl_pct
@@ -265,15 +322,14 @@ class RiskManager:
 
         if triggered:
             await self._redis.set(KILL_KEY, "1")
-            await self.activate_defensive_mode()
             await self._redis.set(STATUS_KEY, json.dumps({
-                "state": "defensive",
-                "reason": f"Daily loss limit hit: ${new_usdt_val:.2f} ({new_val:.2f}%) — switched to defensive strategy",
+                "state": "kill_switch",
+                "reason": f"Daily loss limit hit: ${new_usdt_val:.2f} ({new_val:.2f}%) — trading halted until reset or the next UTC day",
                 "ts": datetime.now(timezone.utc).isoformat(),
             }))
             logger.critical(
-                f"DEFENSIVE MODE TRIGGERED — daily loss ${new_usdt_val:.2f} ({new_val:.2f}%) "
-                f"exceeded limit of -{limit_pct}% — switching to conservative strategy"
+                f"KILL SWITCH — daily loss ${new_usdt_val:.2f} ({new_val:.2f}%) "
+                f"exceeded limit of -{limit_pct}% — halting new entries"
             )
             await telegram.notify_kill_switch(new_val)
             await ev.publish_kill_switch(self._redis, new_val)
