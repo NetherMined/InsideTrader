@@ -23,12 +23,11 @@ class RegimeResult:
     strategy: str  # "trend_following", "mean_reversion", or "conservative"
 
 
-# Thresholds (tunable via config)
 ADX_TRENDING = 25.0
-ADX_RANGING = 20.0   # raised from 15 — more pairs qualify for mean-reversion grid mode
-ATR_PCT_HIGH = 5.0   # High volatility = trending or transition
-BB_WIDTH_LOW = 0.03  # Narrow bands = ranging (raised from 0.02)
-BB_WIDTH_HIGH = 0.10  # Wide bands = trending
+ADX_RANGING = 20.0
+ATR_PCT_HIGH = 5.0
+BB_WIDTH_LOW = 3.0   # percent of price; features store bb width as a percent
+BB_WIDTH_HIGH = 10.0
 
 
 def detect_regime(adx: float, atr_pct: float, bb_width_pct: float) -> RegimeResult:

@@ -14,6 +14,7 @@ Startup sequence:
 import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 
 import ccxt.async_support as ccxt
 import redis.asyncio as aioredis
@@ -43,7 +44,7 @@ def setup_logging() -> None:
         "/app/logs/bot_{time:YYYY-MM-DD}.log",
         format=LOG_FORMAT,
         level="DEBUG",
-        rotation="00:00",
+        rotation="50 MB",
         retention="30 days",
         compression="gz",
     )
@@ -126,6 +127,31 @@ async def hourly_refresh(
             logger.error(f"Hourly refresh error: {e}")
 
 
+async def candle_refresh(pairs: list[str], stop_event: asyncio.Event) -> None:
+    """Keep the last candles fresh so a quiet hour cannot leave the model stale."""
+    while not stop_event.is_set():
+        await asyncio.sleep(300)
+        if stop_event.is_set():
+            break
+        try:
+            await fetch_recent(pairs, settings.analysis_timeframe)
+            if settings.research_enabled:
+                await fetch_recent(pairs, settings.research_timeframe)
+            logger.info(f"Candle refresh complete for {len(pairs)} pairs")
+        except Exception as e:
+            logger.error(f"Candle refresh error: {e}")
+
+
+async def heartbeat(redis: aioredis.Redis, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            await redis.set("bot:heartbeat", datetime.now(timezone.utc).isoformat(), ex=180)
+            logger.info("heartbeat")
+        except Exception as e:
+            logger.warning(f"Heartbeat write failed: {e}")
+        await asyncio.sleep(60)
+
+
 async def periodic_retrain(
     pairs: list[str], stop_event: asyncio.Event
 ) -> None:
@@ -193,22 +219,25 @@ async def main() -> None:
     except Exception as corr_err:
         logger.warning(f"Initial correlation matrix failed: {corr_err}")
 
-    async def _guarded(name: str, coro):
-        try:
-            await coro
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error(f"Task '{name}' crashed: {exc}")
-            stop_event.set()
+    async def _guarded(name: str, factory):
+        while not stop_event.is_set():
+            try:
+                await factory()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"Task '{name}' crashed: {exc} — restarting in 5s")
+                await asyncio.sleep(5)
 
     tasks = [
-        asyncio.create_task(_guarded("trading_engine", run_trading_engine(ranked_store, redis, stop_event))),
-        asyncio.create_task(_guarded("price_stream", poll_prices(pairs, stop_event))),
-        asyncio.create_task(_guarded("hourly_refresh", hourly_refresh(pairs, redis, stop_event, ranked_store))),
-        asyncio.create_task(_guarded("periodic_retrain", periodic_retrain(pairs, stop_event))),
-        asyncio.create_task(_guarded("researcher", run_researcher_loop(ranked_store, redis, stop_event))),
-        asyncio.create_task(_guarded("recovery_researcher", run_recovery_loop(stop_event))),
+        asyncio.create_task(_guarded("trading_engine", lambda: run_trading_engine(ranked_store, redis, stop_event))),
+        asyncio.create_task(_guarded("price_stream", lambda: poll_prices(pairs, stop_event))),
+        asyncio.create_task(_guarded("hourly_refresh", lambda: hourly_refresh(pairs, redis, stop_event, ranked_store))),
+        asyncio.create_task(_guarded("periodic_retrain", lambda: periodic_retrain(pairs, stop_event))),
+        asyncio.create_task(_guarded("candle_refresh", lambda: candle_refresh(pairs, stop_event))),
+        asyncio.create_task(_guarded("heartbeat", lambda: heartbeat(redis, stop_event))),
+        asyncio.create_task(_guarded("researcher", lambda: run_researcher_loop(ranked_store, redis, stop_event))),
+        asyncio.create_task(_guarded("recovery_researcher", lambda: run_recovery_loop(stop_event))),
     ]
     try:
         await asyncio.gather(*tasks)

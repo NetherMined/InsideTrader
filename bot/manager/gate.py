@@ -154,6 +154,14 @@ async def should_enter(
     if venue == "SKIP":
         return Decision(False, f"alignment_skip:{side_or_reason}", packet=packet, rules=rules)
 
+    # A disagreeing model does not get flipped onto the structure side.
+    if market != "NONE" and bot_pred != market:
+        return Decision(
+            False,
+            f"model_structure_disagree:{bot_pred}_vs_{market}",
+            packet=packet, rules=rules,
+        )
+
     # Researcher agreement check — contradictions block, never flip side
     pkt_side_raw = packet.get("pred_1h_close_side", "")
     pkt_conf = float(packet.get("confidence") or 0)
@@ -170,13 +178,15 @@ async def should_enter(
             packet=packet, rules=rules,
         )
 
-    # Researcher agrees — armed gets a boost, unarmed gets a penalty + smaller size
-    if pkt_armed:
-        conf_adj_researcher = 1.10
-        size_adj = 1.0
-    else:
-        conf_adj_researcher = 0.90
-        size_adj = 0.70
+    if not pkt_armed:
+        return Decision(
+            False,
+            f"researcher_unarmed:{pkt_side_raw}@{pkt_conf:.2f}",
+            packet=packet, rules=rules,
+        )
+
+    conf_adj_researcher = 1.10
+    size_adj = 1.0
 
     # Trend alignment confidence multiplier
     conf_adj = 1.0

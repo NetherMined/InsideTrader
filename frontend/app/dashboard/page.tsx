@@ -12,6 +12,71 @@ import { StartupModal } from '@/components/StartupModal';
 import { SymbolModal } from '@/components/SymbolModal';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
+function TopHourTrades() {
+  const { display } = useCurrency();
+  const [hour, setHour] = useState('');
+  const [trades, setTrades] = useState<{ symbol: string; side: string; pnl_usdt: number; closed_at: string | null }[]>([]);
+
+  const load = () => {
+    api.topHourTrades().then((res) => {
+      setHour(res.hour);
+      setTrades(res.trades);
+    }).catch(() => null);
+  };
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
+
+  const label = hour
+    ? new Date(hour).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }) + ' UTC'
+    : 'this hour';
+
+  return (
+    <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold">Top 5 trades this hour</div>
+        <span className="text-xs" style={{ color: '#848e9c' }}>{label}</span>
+      </div>
+      {trades.length === 0 ? (
+        <div className="text-xs py-4 text-center" style={{ color: '#848e9c' }}>No closed trades this hour</div>
+      ) : (
+        <table className="w-full text-xs">
+          <thead>
+            <tr style={{ color: '#848e9c' }}>
+              <th className="text-left pb-2 font-medium">#</th>
+              <th className="text-left pb-2 font-medium">Symbol</th>
+              <th className="text-left pb-2 font-medium">Side</th>
+              <th className="text-right pb-2 font-medium">P&L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {trades.map((t, i) => (
+              <tr key={`${t.symbol}-${t.closed_at}-${i}`} style={{ borderTop: '1px solid #1a1a1a' }}>
+                <td className="py-1.5" style={{ color: '#848e9c' }}>{i + 1}</td>
+                <td className="py-1.5 font-medium">{t.symbol}</td>
+                <td className="py-1.5" style={{ color: t.side === 'BUY' ? '#0ecb81' : '#f6465d' }}>{t.side}</td>
+                <td className="py-1.5 text-right font-semibold" style={{ color: t.pnl_usdt >= 0 ? '#0ecb81' : '#f6465d' }}>
+                  {t.pnl_usdt >= 0 ? '+' : ''}{display(t.pnl_usdt)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 function StatCard({
   label,
   value,
@@ -325,19 +390,42 @@ export default function DashboardPage() {
       loadPositions();
     }, 10000);
 
-    const ws = new WebSocket(WS_URL);
-    wsRef.current = ws;
-    ws.onmessage = (e) => {
-      try {
-        const parsed = JSON.parse(e.data);
-        const data: LivePrice[] = Array.isArray(parsed) ? parsed : parsed?.data ?? [];
-        if (Array.isArray(data)) setPrices(data);
-      } catch {}
+    let ws: WebSocket | null = null;
+    let retry = 1000;
+    let stopped = false;
+    const connect = () => {
+      if (stopped) return;
+      ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+      ws.onopen = () => { retry = 1000; };
+      ws.onmessage = (e) => {
+        try {
+          const parsed = JSON.parse(e.data);
+          const data: LivePrice[] = Array.isArray(parsed) ? parsed : parsed?.data ?? [];
+          if (Array.isArray(data)) setPrices(data);
+        } catch {}
+      };
+      ws.onclose = () => {
+        if (stopped) return;
+        setTimeout(connect, retry);
+        retry = Math.min(retry * 2, 30000);
+      };
     };
+    connect();
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        loadStatus();
+        loadPositions();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
 
     return () => {
+      stopped = true;
       clearInterval(interval);
-      ws.close();
+      document.removeEventListener('visibilitychange', onVisible);
+      ws?.close();
     };
   }, []);
 
@@ -428,6 +516,8 @@ export default function DashboardPage() {
           capitalUsdt={status?.capital_usdt ?? 0}
         />
       </div>
+
+      <TopHourTrades />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div

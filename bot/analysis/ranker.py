@@ -155,6 +155,8 @@ def rank_pairs(
         if confidence <= 0:
             continue
 
+        # predicted_change_pct is the hold-horizon move, so this ranks the
+        # move the trade can actually be open for.
         score = (abs(change) * confidence) / atr_pct
 
         # Adjust score based on funding rate (bonus for collecting funding)

@@ -81,6 +81,7 @@ export const api = {
     get<PnlPeriodStats>(`/api/v1/stats/pnl?period=${period}`),
   modeBreakdown: () => get<ModeBreakdown>('/api/v1/stats/mode-breakdown'),
   recoveryStats: (hours = 24) => get<RecoveryStats>(`/api/v1/stats/recovery?hours=${hours}`),
+  topHourTrades: () => get<{ hour: string; trades: { symbol: string; side: string; pnl_usdt: number; opened_at: string | null; closed_at: string | null }[] }>('/api/v1/stats/top-hour'),
   getAccountBalances: () => get<AccountBalances>('/api/v1/account/balances'),
   convertAllToUsdt: () => post<{ ok: boolean; conversions: Array<{ asset: string; ok: boolean; usdt_received?: number; error?: string }> }>('/api/v1/account/convert-all'),
   getLiveMode: () => get<LiveMode>('/api/v1/settings/live-mode'),

@@ -632,6 +632,28 @@ async def _is_symbol_viable(redis: aioredis.Redis, symbol: str) -> bool:
     return viable
 
 
+async def _candle_is_fresh(symbol: str, max_age_hours: float = 2.0) -> bool:
+    """True when the latest 1h candle is recent enough to trade on."""
+    try:
+        from bot.db.connection import async_session
+        from sqlalchemy import text as _text
+        async with async_session() as session:
+            row = (await session.execute(_text("""
+                SELECT open_time FROM candles
+                WHERE symbol = :symbol AND timeframe = '1h'
+                ORDER BY open_time DESC LIMIT 1
+            """), {"symbol": symbol})).first()
+        if not row or row[0] is None:
+            return False
+        opened = row[0]
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - opened).total_seconds() <= max_age_hours * 3600
+    except Exception as exc:
+        logger.debug(f"{symbol}: candle freshness check failed ({exc})")
+        return False
+
+
 async def _momentum_1h_pct(symbol: str, price: float) -> float | None:
     """Price change over roughly the last hour, from the stored 15m candles."""
     try:
@@ -683,8 +705,21 @@ async def _try_open_trade(
     if not manual and not await _is_symbol_viable(redis, symbol):
         return _no("Symbol blocked (viability / circuit breaker)")
 
-    # Minimum prediction gate — must predict at least 1% move to cover fees and TP distance
-    if not manual and abs(pair.predicted_change_pct) < 1.0:
+    # Do not open on stale prices. A sleeping host or a dead poll leaves
+    # the last tick in Redis; prices expire, and this refuses the gap.
+    if not manual:
+        fresh = await redis.get("prices:last_update")
+        if not fresh:
+            return _no("Prices are stale")
+        try:
+            ts = datetime.fromisoformat(str(fresh).replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age > 30:
+                return _no(f"Prices are {age:.0f}s old")
+        except ValueError:
+            return _no("Prices are stale")
+        if not await _candle_is_fresh(symbol):
+            return _no("1h candle is older than 2 hours")
         return _no(f"Predicted move {pair.predicted_change_pct:+.2f}% under 1%")
 
     # Per-symbol learning — throttle size on poor performers, block only the worst

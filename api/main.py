@@ -1551,6 +1551,35 @@ async def get_mode_breakdown():
     return ModeBreakdownResponse(spot=spot, futures=futures)
 
 
+@app.get("/api/v1/stats/top-hour")
+async def get_top_hour_trades():
+    """Top 5 closed trades by PnL in the current UTC hour."""
+    hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    trades: list[dict] = []
+    try:
+        async with _db_session() as session:
+            rows = (await session.execute(text("""
+                SELECT symbol, side, pnl_usdt, opened_at, closed_at
+                FROM trades
+                WHERE status = 'CLOSED'
+                  AND (archived = false OR archived IS NULL)
+                  AND closed_at >= :hour
+                ORDER BY pnl_usdt DESC
+                LIMIT 5
+            """), {"hour": hour})).mappings().all()
+        for row in rows:
+            trades.append({
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "pnl_usdt": round(float(row["pnl_usdt"] or 0), 4),
+                "opened_at": row["opened_at"].isoformat() if row["opened_at"] else None,
+                "closed_at": row["closed_at"].isoformat() if row["closed_at"] else None,
+            })
+    except Exception as e:
+        logger.error(f"top hour trades error: {e}")
+    return {"hour": hour.isoformat(), "trades": trades}
+
+
 @app.get("/api/v1/stats/recovery")
 async def get_recovery_stats(hours: int = Query(24, ge=1, le=720)):
     """Post-exit recovery data from the 1m researcher, grouped by close reason."""

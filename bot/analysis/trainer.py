@@ -243,8 +243,14 @@ async def run_analysis(symbols: list[str]) -> list[RankedPair]:
         conf *= d_factor
 
         mode = pred.get("mode", "SPOT")
-        if mode == "FUTURES" or mode == "DYNAMIC":
-            r_factor = regime_factors.get("TRENDING", 1.0)
+        if mode in ("FUTURES", "DYNAMIC"):
+            from bot.analysis.regime_detector import detect_regime
+            regime = detect_regime(
+                float(pred.get("adx") or 0.0),
+                float(pred.get("atr_pct") or 0.0),
+                float(pred.get("bb_width_pct") or 0.0),
+            )
+            r_factor = regime_factors.get(regime.regime, 1.0)
         else:
             r_factor = 1.0
         conf *= r_factor

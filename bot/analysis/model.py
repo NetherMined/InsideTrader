@@ -1,8 +1,7 @@
 """XGBoost price prediction model.
 
-Trains a regression model (predicted 24h % change) alongside a
-classification model (probability the price moves in the predicted
-direction) which serves as the confidence score.
+Trains a regression model (predicted hold-horizon % change) alongside a
+classification model (probability the price moves in that direction).
 """
 
 import os
