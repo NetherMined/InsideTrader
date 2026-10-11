@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import { fmt, fmtPct, fmtPrice, timeAgo } from '@/lib/utils';
 import { useCurrency } from '@/lib/currency';
 import type { Trade } from '@/lib/types';
+import { SymbolLink } from '@/components/SymbolLink';
 
 export default function HistoryPage() {
   const { display, tooltip } = useCurrency();
@@ -141,7 +142,7 @@ export default function HistoryPage() {
             <tbody>
               {sortedTrades.map((t) => (
                 <tr key={t.id} style={{ borderTop: '1px solid #1a1a1a' }}>
-                  <td className="px-4 py-2 font-medium">{t.symbol}</td>
+                  <td className="px-4 py-2 font-medium"><SymbolLink symbol={t.symbol} /></td>
                   <td className="px-4 py-2" style={{ color: t.side === 'BUY' ? '#0ecb81' : '#f6465d' }}>
                     {t.side}
                   </td>

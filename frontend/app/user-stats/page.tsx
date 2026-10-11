@@ -9,6 +9,7 @@ import {
   ComposedChart, Bar, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
   CartesianGrid,
 } from 'recharts';
+import { SymbolLink } from '@/components/SymbolLink';
 
 function BigStat({
   label,
@@ -536,7 +537,7 @@ export default function UserStatsPage() {
                         style={{ background: profit ? '#0ecb81' : '#f6465d' }}
                       />
                       <div>
-                        <div className="font-semibold">{t.symbol}</div>
+                        <div className="font-semibold"><SymbolLink symbol={t.symbol} /></div>
                         <div style={{ color: '#848e9c' }}>
                           {t.side === 'BUY' ? 'Bought & sold' : 'Shorted & covered'} · {t.mode} · {closedAt}
                         </div>

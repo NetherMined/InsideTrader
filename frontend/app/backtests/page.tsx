@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import { fmt } from '@/lib/utils';
 import type { Backtest } from '@/lib/types';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { SymbolLink } from '@/components/SymbolLink';
 
 export default function BacktestsPage() {
   const [backtests, setBacktests] = useState<Backtest[]>([]);
@@ -116,7 +117,7 @@ export default function BacktestsPage() {
             <tbody>
               {filtered.map((b, i) => (
                 <tr key={i} style={{ borderTop: '1px solid #1a1a1a' }}>
-                  <td className="px-4 py-2 font-medium">{b.symbol}</td>
+                  <td className="px-4 py-2 font-medium"><SymbolLink symbol={b.symbol} /></td>
                   <td className="px-4 py-2">
                     <span
                       className="px-1.5 py-0.5 rounded font-medium"

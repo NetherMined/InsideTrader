@@ -6,6 +6,7 @@ import { fmt, fmtPrice, timeAgo } from '@/lib/utils';
 import { useCurrency } from '@/lib/currency';
 import type { Position } from '@/lib/types';
 import { X } from 'lucide-react';
+import { SymbolLink } from '@/components/SymbolLink';
 
 export default function PositionsPage() {
   const { display, tooltip } = useCurrency();
@@ -104,7 +105,7 @@ export default function PositionsPage() {
                   className={p.unrealized_pnl > 0 ? 'row-profit' : p.unrealized_pnl < 0 ? 'row-loss' : undefined}
                   style={{ borderTop: '1px solid #1a1a1a' }}
                 >
-                  <td className="px-4 py-2 font-medium">{p.symbol}</td>
+                  <td className="px-4 py-2 font-medium"><SymbolLink symbol={p.symbol} /></td>
                   <td className="px-4 py-2" style={{ color: p.side === 'BUY' ? '#0ecb81' : '#f6465d' }}>
                     {p.side}
                   </td>

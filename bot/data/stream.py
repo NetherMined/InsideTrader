@@ -42,7 +42,9 @@ async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
     try:
         while not stop_event.is_set():
             try:
-                futures_pairs = [s if ":" in s else f"{s}:USDT" for s in active_pairs]
+                extras = await redis.hkeys("bot:extra_price_symbols")
+                polled = active_pairs + [e for e in extras if e not in active_pairs]
+                futures_pairs = [s if ":" in s else f"{s}:USDT" for s in polled]
                 tickers = await exchange.fetch_tickers(futures_pairs)
                 pipe = redis.pipeline()
 
@@ -105,6 +107,7 @@ async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:
                 msg = str(e)
                 if "does not have market symbol" in msg:
                     bad = msg.split("does not have market symbol")[-1].strip().split()[0]
+                    await redis.hdel("bot:extra_price_symbols", bad.split(":")[0])
                     if bad in active_pairs:
                         active_pairs.remove(bad)
                         logger.warning(f"Dropping unknown market {bad} from price poll ({len(active_pairs)} left)")

@@ -6,6 +6,7 @@ import { fmtPrice } from '@/lib/utils';
 import { useCurrency } from '@/lib/currency';
 import { api } from '@/lib/api';
 import type { Position, Candle } from '@/lib/types';
+import { SymbolLink } from '@/components/SymbolLink';
 
 type TF = '1m' | '15m' | '1h';
 const TF_LIST: TF[] = ['1m', '15m', '1h'];
@@ -258,7 +259,7 @@ export function PositionChart({
       <div className="px-3 pt-3 pb-2">
         <div className="flex items-center justify-between mb-1.5">
           <div className="flex items-center gap-2">
-            <span className="font-bold text-sm">{position.symbol}</span>
+            <SymbolLink symbol={position.symbol} className="font-bold text-sm" />
             <span
               className="text-xs px-1.5 py-0.5 rounded font-medium"
               style={{

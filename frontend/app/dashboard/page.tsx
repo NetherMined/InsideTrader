@@ -9,13 +9,12 @@ import type { BotStatus, Position, LivePrice, Candle, PnlPeriodStats, MarketSent
 import { useCurrency } from '@/lib/currency';
 import { ExternalLink, X } from 'lucide-react';
 import { StartupModal } from '@/components/StartupModal';
-import { SymbolModal } from '@/components/SymbolModal';
+import { SymbolLink, useSymbolModal } from '@/components/SymbolLink';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
 function TopHourTrades() {
-  const { display } = useCurrency();
   const [hour, setHour] = useState('');
-  const [trades, setTrades] = useState<{ symbol: string; side: string; pnl_usdt: number; closed_at: string | null }[]>([]);
+  const [trades, setTrades] = useState<{ symbol: string; side: string; predicted_change_pct: number; confidence: number; predicted_at: string | null }[]>([]);
 
   const load = () => {
     api.topHourTrades().then((res) => {
@@ -44,11 +43,11 @@ function TopHourTrades() {
   return (
     <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
       <div className="flex items-center justify-between mb-3">
-        <div className="text-sm font-semibold">Top 5 trades this hour</div>
+        <div className="text-sm font-semibold">Top 5 predicted trades</div>
         <span className="text-xs" style={{ color: '#848e9c' }}>{label}</span>
       </div>
       {trades.length === 0 ? (
-        <div className="text-xs py-4 text-center" style={{ color: '#848e9c' }}>No closed trades this hour</div>
+        <div className="text-xs py-4 text-center" style={{ color: '#848e9c' }}>No ML predictions yet</div>
       ) : (
         <table className="w-full text-xs">
           <thead>
@@ -56,18 +55,20 @@ function TopHourTrades() {
               <th className="text-left pb-2 font-medium">#</th>
               <th className="text-left pb-2 font-medium">Symbol</th>
               <th className="text-left pb-2 font-medium">Side</th>
-              <th className="text-right pb-2 font-medium">P&L</th>
+              <th className="text-right pb-2 font-medium">Predicted</th>
+              <th className="text-right pb-2 font-medium">Conf</th>
             </tr>
           </thead>
           <tbody>
             {trades.map((t, i) => (
-              <tr key={`${t.symbol}-${t.closed_at}-${i}`} style={{ borderTop: '1px solid #1a1a1a' }}>
+              <tr key={`${t.symbol}-${i}`} style={{ borderTop: '1px solid #1a1a1a' }}>
                 <td className="py-1.5" style={{ color: '#848e9c' }}>{i + 1}</td>
-                <td className="py-1.5 font-medium">{t.symbol}</td>
+                <td className="py-1.5 font-medium"><SymbolLink symbol={t.symbol} /></td>
                 <td className="py-1.5" style={{ color: t.side === 'BUY' ? '#0ecb81' : '#f6465d' }}>{t.side}</td>
-                <td className="py-1.5 text-right font-semibold" style={{ color: t.pnl_usdt >= 0 ? '#0ecb81' : '#f6465d' }}>
-                  {t.pnl_usdt >= 0 ? '+' : ''}{display(t.pnl_usdt)}
+                <td className="py-1.5 text-right font-semibold" style={{ color: t.predicted_change_pct >= 0 ? '#0ecb81' : '#f6465d' }}>
+                  {t.predicted_change_pct >= 0 ? '+' : ''}{t.predicted_change_pct.toFixed(2)}%
                 </td>
+                <td className="py-1.5 text-right" style={{ color: '#848e9c' }}>{Math.round(t.confidence * 100)}%</td>
               </tr>
             ))}
           </tbody>
@@ -318,7 +319,7 @@ export default function DashboardPage() {
   const [pnlHistory, setPnlHistory] = useState<{ t: string; pnl: number }[]>([]);
   const [candles, setCandles] = useState<Record<string, Candle[]>>({});
   const [clock, setClock] = useState('');
-  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
+  const openSymbol = useSymbolModal();
   const wsRef = useRef<WebSocket | null>(null);
 
   const loadStatus = async () => {
@@ -458,9 +459,6 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6 space-y-6">
-      {selectedSymbol && (
-        <SymbolModal symbol={selectedSymbol} onClose={() => setSelectedSymbol(null)} />
-      )}
       {showStartupModal && (
         <StartupModal
           onConfirmed={() => { setShowStartupModal(false); setStartupDismissed(true); loadStatus(); }}
@@ -579,7 +577,7 @@ export default function DashboardPage() {
               <button
                 type="button"
                 key={p.symbol}
-                onClick={() => setSelectedSymbol(p.symbol)}
+                onClick={() => openSymbol(p.symbol)}
                 className="w-full flex items-center justify-between text-xs px-1.5 py-1 rounded cursor-pointer hover:bg-white/10 focus-visible:bg-white/10 focus:outline-none transition-colors"
                 title={`View ${p.symbol} details and open a position`}
               >
@@ -644,7 +642,7 @@ export default function DashboardPage() {
                   className={p.unrealized_pnl > 0 ? 'row-profit' : p.unrealized_pnl < 0 ? 'row-loss' : undefined}
                   style={{ borderTop: '1px solid #1a1a1a' }}
                 >
-                  <td className="py-1.5 pl-2 font-medium">{p.symbol}</td>
+                  <td className="py-1.5 pl-2 font-medium"><SymbolLink symbol={p.symbol} /></td>
                   <td className="py-1.5" style={{ color: p.side === 'BUY' ? '#0ecb81' : '#f6465d' }}>
                     {p.side}
                   </td>

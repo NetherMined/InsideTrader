@@ -130,7 +130,7 @@ async def hourly_refresh(
 async def candle_refresh(pairs: list[str], stop_event: asyncio.Event) -> None:
     """Keep the last candles fresh so a quiet hour cannot leave the model stale."""
     while not stop_event.is_set():
-        await asyncio.sleep(300)
+        await asyncio.sleep(120)
         if stop_event.is_set():
             break
         try:
@@ -192,32 +192,7 @@ async def main() -> None:
     pairs = settings.pairs_list or top_pairs
     logger.info(f"Using {len(pairs)} pairs")
 
-    logger.info("Fetching historical OHLCV data (1h manager)...")
-    await fetch_historical(pairs, settings.analysis_timeframe)
-    if settings.research_enabled:
-        logger.info(f"Fetching {settings.research_timeframe} candles for researcher (capped lookback)...")
-        await fetch_historical(pairs, settings.research_timeframe)
-
-    logger.info("Running analysis engine...")
-    ranked = await run_analysis(pairs)
-    logger.info(f"Analysis complete — {len(ranked)} ranked opportunities")
-
-    redis = _make_redis()
-    await redis.set("bot:trading_mode", "FUTURES")
-    await redis.set("bot:force_trade_mode", "FUTURES")
-    await redis.delete("bot:disable_futures_buy")
     stop_event = asyncio.Event()
-    ranked_store = {"pairs": ranked}
-
-    logger.info("Computing initial correlation matrix...")
-    try:
-        from bot.analysis.ranker import fetch_pair_correlations
-        corr = await fetch_pair_correlations([p.symbol for p in ranked])
-        if corr:
-            await redis.setex("bot:correlation_matrix", 3600, json.dumps(corr))
-            logger.info(f"Correlation matrix ready ({len(corr)} symbols)")
-    except Exception as corr_err:
-        logger.warning(f"Initial correlation matrix failed: {corr_err}")
 
     async def _guarded(name: str, factory):
         while not stop_event.is_set():
@@ -229,9 +204,57 @@ async def main() -> None:
                 logger.error(f"Task '{name}' crashed: {exc} — restarting in 5s")
                 await asyncio.sleep(5)
 
+    price_task = asyncio.create_task(_guarded("price_stream", lambda: poll_prices(pairs, stop_event)))
+
+    logger.info("Fetching historical OHLCV data (1h manager)...")
+    await fetch_historical(pairs, settings.analysis_timeframe)
+    if settings.research_enabled:
+        logger.info(f"Fetching {settings.research_timeframe} candles for researcher (capped lookback)...")
+        await fetch_historical(pairs, settings.research_timeframe)
+
+    redis = _make_redis()
+    await redis.set("bot:trading_mode", "FUTURES")
+    await redis.set("bot:force_trade_mode", "FUTURES")
+    await redis.delete("bot:disable_futures_buy")
+    ranked_store: dict = {"pairs": []}
+
+    async def repair_candles() -> None:
+        try:
+            logger.info("Repairing partial candles from earlier refreshes...")
+            await fetch_historical(pairs, settings.analysis_timeframe, repair_days=365)
+            if settings.research_enabled:
+                await fetch_historical(pairs, settings.research_timeframe, repair_days=30)
+            logger.info("Candle repair complete")
+        except Exception as exc:
+            logger.error(f"Candle repair failed: {exc}")
+
+    async def initial_analysis() -> None:
+        await repair_candles()
+        logger.info("Running analysis engine...")
+        ranked = await run_analysis(pairs)
+        ranked_store["pairs"] = ranked
+        logger.info(f"Analysis complete — {len(ranked)} ranked opportunities")
+
+        logger.info("Computing initial correlation matrix...")
+        try:
+            from bot.analysis.ranker import fetch_pair_correlations
+            corr = await fetch_pair_correlations([p.symbol for p in ranked])
+            if corr:
+                await redis.setex("bot:correlation_matrix", 3600, json.dumps(corr))
+                logger.info(f"Correlation matrix ready ({len(corr)} symbols)")
+        except Exception as corr_err:
+            logger.warning(f"Initial correlation matrix failed: {corr_err}")
+
+    async def run_initial_analysis() -> None:
+        try:
+            await initial_analysis()
+        except Exception as exc:
+            logger.error(f"Initial analysis failed: {exc}")
+
     tasks = [
+        asyncio.create_task(run_initial_analysis()),
         asyncio.create_task(_guarded("trading_engine", lambda: run_trading_engine(ranked_store, redis, stop_event))),
-        asyncio.create_task(_guarded("price_stream", lambda: poll_prices(pairs, stop_event))),
+        price_task,
         asyncio.create_task(_guarded("hourly_refresh", lambda: hourly_refresh(pairs, redis, stop_event, ranked_store))),
         asyncio.create_task(_guarded("periodic_retrain", lambda: periodic_retrain(pairs, stop_event))),
         asyncio.create_task(_guarded("candle_refresh", lambda: candle_refresh(pairs, stop_event))),

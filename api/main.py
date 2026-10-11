@@ -1410,6 +1410,31 @@ async def get_symbol_overview(
     )
 
 
+async def _register_extra_price_symbol(redis, symbol: str) -> None:
+    """Start streaming a price for a futures symbol outside the bot's tracked pairs."""
+    base = symbol.split(":")[0]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://fapi.binance.com/fapi/v1/ticker/price",
+                params={"symbol": base.replace("/", "")},
+            )
+            resp.raise_for_status()
+            price = float(resp.json()["price"])
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"{symbol} is not a tradable Binance futures market")
+    await redis.hset("bot:extra_price_symbols", base, datetime.now(timezone.utc).isoformat())
+    await redis.set(
+        f"price:{base}",
+        json.dumps({
+            "symbol": base, "price": price, "bid": price, "ask": price,
+            "change_pct": 0.0, "volume_24h": 0.0,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }),
+        ex=60,
+    )
+
+
 class ManualOpenRequest(BaseModel):
     symbol: str
     side: str
@@ -1425,7 +1450,7 @@ async def manual_open_position(req: ManualOpenRequest):
     redis = await get_redis()
     try:
         if not await redis.exists(f"price:{req.symbol}"):
-            raise HTTPException(status_code=404, detail=f"No live price for {req.symbol}")
+            await _register_extra_price_symbol(redis, req.symbol)
         request_id = uuid.uuid4().hex
         payload = {
             "id": request_id,
@@ -1553,27 +1578,34 @@ async def get_mode_breakdown():
 
 @app.get("/api/v1/stats/top-hour")
 async def get_top_hour_trades():
-    """Top 5 closed trades by PnL in the current UTC hour."""
+    """Top 5 ML-predicted opportunities, ranked by |predicted change| x confidence."""
     hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     trades: list[dict] = []
     try:
         async with _db_session() as session:
             rows = (await session.execute(text("""
-                SELECT symbol, side, pnl_usdt, opened_at, closed_at
-                FROM trades
-                WHERE status = 'CLOSED'
-                  AND (archived = false OR archived IS NULL)
-                  AND closed_at >= :hour
-                ORDER BY pnl_usdt DESC
+                SELECT symbol, current_price, target_price, predicted_change_pct,
+                       confidence, prediction_date
+                FROM (
+                    SELECT DISTINCT ON (symbol) symbol, current_price, target_price,
+                           predicted_change_pct, confidence, prediction_date
+                    FROM predictions
+                    WHERE prediction_date >= NOW() - INTERVAL '24 hours'
+                    ORDER BY symbol, prediction_date DESC
+                ) latest
+                ORDER BY ABS(predicted_change_pct) * confidence DESC
                 LIMIT 5
-            """), {"hour": hour})).mappings().all()
+            """))).mappings().all()
         for row in rows:
+            change = float(row["predicted_change_pct"] or 0)
             trades.append({
                 "symbol": row["symbol"],
-                "side": row["side"],
-                "pnl_usdt": round(float(row["pnl_usdt"] or 0), 4),
-                "opened_at": row["opened_at"].isoformat() if row["opened_at"] else None,
-                "closed_at": row["closed_at"].isoformat() if row["closed_at"] else None,
+                "side": "BUY" if change > 0 else "SELL",
+                "predicted_change_pct": round(change, 3),
+                "confidence": round(float(row["confidence"] or 0), 3),
+                "current_price": float(row["current_price"] or 0),
+                "target_price": float(row["target_price"] or 0),
+                "predicted_at": row["prediction_date"].isoformat() if row["prediction_date"] else None,
             })
     except Exception as e:
         logger.error(f"top hour trades error: {e}")

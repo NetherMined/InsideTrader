@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { fmtVol } from '@/lib/utils';
 import type { Market } from '@/lib/types';
+import { SymbolLink } from '@/components/SymbolLink';
 
 export default function MarketsPage() {
   const [markets, setMarkets] = useState<Market[]>([]);
@@ -104,7 +105,7 @@ export default function MarketsPage() {
             <tbody>
               {filtered.map((m) => (
                 <tr key={m.symbol + m.market_type} style={{ borderTop: '1px solid #1a1a1a' }}>
-                  <td className="px-4 py-2 font-medium">{m.symbol}</td>
+                  <td className="px-4 py-2 font-medium"><SymbolLink symbol={m.symbol} /></td>
                   <td className="px-4 py-2" style={{ color: '#848e9c' }}>{m.base}</td>
                   <td className="px-4 py-2">
                     <span

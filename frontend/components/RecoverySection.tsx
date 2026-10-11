@@ -1,6 +1,7 @@
 'use client';
 
 import type { RecoveryStats } from '@/lib/types';
+import { SymbolLink } from '@/components/SymbolLink';
 
 const REASON_LABELS: Record<string, string> = {
   stop_loss: 'Stop loss',
@@ -97,7 +98,7 @@ export default function RecoverySection({
               {recent.map((t) => (
                 <tr key={t.trade_id} style={{ borderTop: '1px solid #1a1a1a' }}>
                   <td className="px-3 py-2">
-                    <span className="font-semibold">{t.symbol}</span>{' '}
+                    <SymbolLink symbol={t.symbol} className="font-semibold" />{' '}
                     <span style={{ color: t.side === 'BUY' ? GREEN : RED }}>{t.side === 'BUY' ? 'Long' : 'Short'}</span>
                   </td>
                   <td className="px-3 py-2">{REASON_LABELS[t.close_reason ?? ''] ?? t.close_reason ?? '—'}</td>

@@ -56,18 +56,36 @@ async def _upsert_candles(rows: list[dict]) -> None:
         stmt = (
             insert(Candle)
             .values(rows)
-            .on_conflict_do_nothing(constraint="uq_candle")
+        )
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_candle",
+            set_={
+                "open": stmt.excluded.open,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "close": stmt.excluded.close,
+                "volume": stmt.excluded.volume,
+                "close_time": stmt.excluded.close_time,
+            },
         )
         await session.execute(stmt)
         await session.commit()
 
 
-async def fetch_pair(symbol: str, timeframe: str, exchange: ccxt.binance) -> int:
-    """Fetch and store missing candles for a single symbol. Returns count stored."""
+async def fetch_pair(
+    symbol: str, timeframe: str, exchange: ccxt.binance, repair_days: int | None = None
+) -> int:
+    """Fetch and store missing candles for a single symbol. Returns count stored.
+
+    Re-fetches from the last stored candle so the one that was still forming gets
+    its final values. repair_days re-fetches that many days to fix old partial candles.
+    """
     last_time = await _get_last_candle_time(symbol, timeframe)
 
-    if last_time:
-        since_dt = last_time + timedelta(milliseconds=_timeframe_to_ms(timeframe))
+    if repair_days:
+        since_dt = datetime.now(timezone.utc) - timedelta(days=repair_days)
+    elif last_time:
+        since_dt = last_time
     else:
         # Sub-hourly timeframes cap at 30 days to avoid fetching years of dense candles on first run
         _tf_max = {"5m": 30, "15m": 30, "30m": 30}
@@ -127,7 +145,9 @@ async def fetch_pair(symbol: str, timeframe: str, exchange: ccxt.binance) -> int
     return total_stored
 
 
-async def fetch_historical(pairs: list[str], timeframe: str | None = None) -> None:
+async def fetch_historical(
+    pairs: list[str], timeframe: str | None = None, repair_days: int | None = None
+) -> None:
     """Fetch historical data for a list of pairs. Runs pairs concurrently in batches."""
     tf = timeframe or settings.analysis_timeframe
     exchange = _make_exchange()
@@ -137,8 +157,8 @@ async def fetch_historical(pairs: list[str], timeframe: str | None = None) -> No
 
         async def fetch_with_sem(symbol: str) -> tuple[str, int]:
             async with semaphore:
-                count = await fetch_pair(symbol, tf, exchange)
-                if count:
+                count = await fetch_pair(symbol, tf, exchange, repair_days)
+                if count > 1:
                     logger.info(f"Fetched {count} candles for {symbol}")
                 return symbol, count
 

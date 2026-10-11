@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { fmt, fmtPct, fmtPrice } from '@/lib/utils';
 import type { Prediction } from '@/lib/types';
+import { SymbolLink } from '@/components/SymbolLink';
 
 function ConfidenceBar({ value }: { value: number }) {
   const pct = Math.round(value * 100);
@@ -96,7 +97,7 @@ export default function PredictionsPage() {
                       background: selected?.symbol === p.symbol ? 'rgba(240,185,11,0.05)' : 'transparent',
                     }}
                   >
-                    <td className="px-4 py-2 font-medium">{p.symbol}</td>
+                    <td className="px-4 py-2 font-medium"><SymbolLink symbol={p.symbol} /></td>
                     <td className="px-4 py-2 text-right">{fmtPrice(p.current_price)}</td>
                     <td className="px-4 py-2 text-right">{fmtPrice(p.target_price)}</td>
                     <td
