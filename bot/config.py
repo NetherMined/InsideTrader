@@ -27,13 +27,15 @@ class Settings(BaseSettings):
     volatility_futures_cap_percent: float = 5.0
     adx_futures_threshold: float = 25.0
 
-    daily_target_percent: float = 2.0
-    confidence_threshold: float = 0.70
-    stop_loss_percent: float = 2.0
-    take_profit_percent: float = 3.0
-    daily_loss_limit_percent: float = 20.0
+    daily_target_percent: float = 3.0
+    daily_profit_target_usdt: float = 100.0
+    confidence_threshold: float = 0.62
+    stop_loss_percent: float = 0.6
+    take_profit_percent: float = 1.0
+    daily_loss_limit_percent: float = 5.0
+    min_predicted_move_pct: float = 0.5
     momentum_filter_enabled: bool = True
-    momentum_flat_pct: float = 1.0
+    momentum_flat_pct: float = 0.3
     cost_gate_enabled: bool = True
     max_roundtrip_cost_pct: float = 0.20
     loss_pause_after: int = 3
@@ -42,19 +44,19 @@ class Settings(BaseSettings):
     loss_half_size_after: int = 3
     loss_material_pct: float = 0.5
     loss_state_ttl_hours: int = 6
-    negative_trade_timeout_minutes: int = 60
+    negative_trade_timeout_minutes: int = 30
     taker_fee_rate: float = 0.0004
 
-    heat_limit_pct: float = 100.0
-    max_single_symbol_heat_pct: float = 100.0
-    max_trade_margin_usdt: float = 0.0  # 0 = no dollar cap; one trade uses full capital as margin
+    heat_limit_pct: float = 25.0
+    max_single_symbol_heat_pct: float = 25.0
+    max_trade_margin_usdt: float = 0.0  # 0 = no dollar cap; one trade risks about 1% of equity
 
-    min_rr_ratio: float = 2.5
-    zone_sl_max_pct: float = 3.0
+    min_rr_ratio: float = 1.5
+    zone_sl_max_pct: float = 1.2
     zone_sl_buffer_atr: float = 0.15
     zone_proximity_atr: float = 1.0
     swing_lookback: int = 3
-    structure_cache_ttl: int = 3600
+    structure_cache_ttl: int = 900
 
     paper_trading_mode: bool = True
     research_enabled: bool = True

@@ -33,7 +33,7 @@ import ccxt.async_support as ccxt
 from api.config import settings
 from api.db import get_session, check_db, async_session as _db_session
 
-_HEAT_LIMIT_PCT = 100.0
+_HEAT_LIMIT_PCT = 25.0
 
 # re-export for inline use in endpoints
 _starting_capital = settings.starting_capital_usdt

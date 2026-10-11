@@ -1,8 +1,8 @@
 """Heat-based position sizing.
 
-Experiments: one position, full capital as futures margin.
-Heat limit and per-symbol cap are 100%. Per-trade heat is the free heat,
-which is the whole account when nothing is open.
+Experiments day trader: one position at a time, about 25% of capital as
+margin. At 5x with a ~0.8% price stop that is about 1% of equity at risk,
+so the slot can be recycled many times a day.
 """
 
 from loguru import logger

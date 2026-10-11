@@ -55,7 +55,7 @@ _FUNDING_CACHE_KEY = "bot:funding_rates_cache"
 _FUNDING_CACHE_TTL = 300  # 5 minutes
 _CORR_CACHE_KEY = "bot:correlation_matrix"
 _CORR_CACHE_TTL = 3600  # 1 hour
-_SYMBOL_COOLDOWN_SECONDS = 300  # 5 min cooldown after closing a symbol before reopening
+_SYMBOL_COOLDOWN_SECONDS = 90  # short recycle so a day can hold many sequential trades
 _MACRO_TREND_CACHE_KEY = "bot:macro_trend_cache"
 _MACRO_TREND_CACHE_TTL = 120  # 2 minutes
 _STRUCTURE_CACHE_PREFIX = "structure:"
@@ -134,22 +134,31 @@ async def _get_macro_trend(redis: aioredis.Redis) -> str:
 
     await redis.setex(_MACRO_TREND_CACHE_KEY, _MACRO_TREND_CACHE_TTL, trend)
     return trend
-_TRAIL_ACTIVATION_PCT = 4.0    # arm the trail at +4% effective (0.8% price at 5x); replay beat the old 1.0
-_TRAIL_REVERSAL_PCT = 2.0      # give back 2% effective (0.4% price) from the peak before closing
-_MIN_PROFIT_USD = 2.00         # never close a winning trade below $2 PnL (non-SL)
-_MAX_LOSS_PCT = 6.0            # leveraged loss cap (6% at 5x = 1.2% price move)
-_EMERGENCY_LOSS_PCT = 10.0     # leveraged loss cap during the entry grace window
-_SL_GRACE_SECONDS = 90         # ignore normal SL right after entry to ride out entry noise
-_INVALIDATION_MIN_HOLD_S = 300  # structure invalidation only counts after 5 min
-_INVALIDATION_BUFFER = 0.003   # price must break the level by 0.3%
-_BREAKER_TRADES = 8            # symbol circuit breaker: look at the last N closed trades
-_BREAKER_MIN_TRADES = 4        # ...needing at least this many inside the window
-_BREAKER_LOSS_USD = 40.0       # ...block the symbol once their net loss reaches this
-_BREAKER_WINDOW_HOURS = 24     # ...and only count trades from this window
-_VIABILITY_WINDOW_HOURS = 72   # viability block only counts trades from this window, so blocked symbols retry
+_TRAIL_ACTIVATION_PCT = 2.0    # arm at +2% effective (0.4% price at 5x) and lock the small move
+_TRAIL_REVERSAL_PCT = 1.0      # give back 1% effective (0.2% price) from the peak
+_MIN_PROFIT_USD = 0.20         # do not block a small winning scalp
+_MAX_LOSS_PCT = 4.0            # leveraged loss cap (~0.8% price at 5x)
+_EMERGENCY_LOSS_PCT = 6.0      # hard cap during the entry grace window
+_SL_GRACE_SECONDS = 45         # short grace; a scalp should not sit through noise
+_INVALIDATION_MIN_HOLD_S = 180
+_INVALIDATION_BUFFER = 0.003
+_BREAKER_TRADES = 8
+_BREAKER_MIN_TRADES = 4
+_BREAKER_LOSS_USD = 8.0        # block a symbol after a small day-trade losing streak
+_BREAKER_WINDOW_HOURS = 24
+_VIABILITY_WINDOW_HOURS = 72
+_MAX_HOLD_MINUTES = 45         # intraday only; recycle the slot
+_SESSION_FLAT_MINUTE = 45      # flat before UTC midnight so nothing is held overnight
 _TP_TRAIL_PREFIX = "bot:tp_trail:"  # TP follower anchor per position
 _FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"  # SPOT / FUTURES / DYNAMIC
 _DISABLE_FUTURES_BUY_KEY = "bot:disable_futures_buy"  # 1 = gate FUTURES BUY to SPOT BUY
+
+
+def _session_is_closed() -> bool:
+    """No new risk in the last minutes of the UTC day. Crypto has no close, so
+    the session ends at midnight UTC and every position is flattened before it."""
+    now = datetime.now(timezone.utc)
+    return now.hour == 23 and now.minute >= (60 - _SESSION_FLAT_MINUTE)
 
 
 async def _fetch_funding_rates_cached(redis: aioredis.Redis, symbols: list[str]) -> dict[str, dict]:
@@ -498,9 +507,14 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 if minutes_open >= scratch_timeout and pnl_usdt < 0 and effective_pnl_pct <= -1.0:
                     close_reason = "negative_timeout"
                     logger.info(f"{symbol}: scratch timeout {minutes_open:.0f}min (${pnl_usdt:.4f}, {effective_pnl_pct:.2f}%)")
-                elif minutes_open >= 120:  # day trading hard max: 2 hours
+                elif minutes_open >= _MAX_HOLD_MINUTES:
                     close_reason = "max_hold"
-                    logger.info(f"{symbol}: max hold 2h reached after {minutes_open:.0f}min — closing at {effective_pnl_pct:+.2f}%")
+                    logger.info(f"{symbol}: max hold {_MAX_HOLD_MINUTES}m reached after {minutes_open:.0f}min — closing at {effective_pnl_pct:+.2f}%")
+
+        now_utc = datetime.now(timezone.utc)
+        if close_reason is None and now_utc.hour == 23 and now_utc.minute >= _SESSION_FLAT_MINUTE:
+            close_reason = "session_flat"
+            logger.info(f"{symbol}: session flat — closing before UTC midnight at {effective_pnl_pct:+.2f}%")
 
         if close_reason:
             close_ok = True
@@ -552,8 +566,8 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             await redis.srem(recovery_key, str(pos_id))
             await redis.delete(f"bot:trail:{pos_id}")
 
-            # Estimate and record fee for this trade
-            estimated_fee = abs(notional * settings.taker_fee_rate)  # Binance taker fee ~0.04%
+            # Record both sides of the taker fee. One side understated the round trip.
+            estimated_fee = abs(notional * settings.taker_fee_rate * 2)
             await risk.record_fee(estimated_fee)
 
             await close_position(
@@ -720,8 +734,10 @@ async def _try_open_trade(
             return _no("Prices are stale")
         if not await _candle_is_fresh(symbol):
             return _no("1h candle is older than 2 hours")
-    if not manual and abs(pair.predicted_change_pct) < 1.0:
-        return _no(f"Predicted move {pair.predicted_change_pct:+.2f}% under 1%")
+    if not manual and _session_is_closed():
+        return _no("Session closed — no new trades before UTC midnight")
+    if not manual and abs(pair.predicted_change_pct) < settings.min_predicted_move_pct:
+        return _no(f"Predicted move {pair.predicted_change_pct:+.2f}% under {settings.min_predicted_move_pct:.1f}%")
 
     # Per-symbol learning — throttle size on poor performers, block only the worst
     try:
@@ -890,11 +906,12 @@ async def _try_open_trade(
         mom_1h = await _momentum_1h_pct(symbol, current_price)
         if mom_1h is not None:
             flat = settings.momentum_flat_pct
-            if side == "SELL" and mom_1h < -flat:
-                logger.info(f"{symbol}: SELL skipped — already fell {mom_1h:+.2f}% over 1h (chasing the move)")
-                return _no(f"Momentum filter: SELL after a {mom_1h:+.2f}% 1h drop")
+            predicted = abs(pair.predicted_change_pct)
+            if side == "BUY" and mom_1h > max(predicted, flat):
+                return _no(f"Momentum filter: BUY chasing a {mom_1h:+.2f}% move already larger than the prediction")
+            if side == "SELL" and mom_1h < -max(predicted, flat):
+                return _no(f"Momentum filter: SELL chasing a {mom_1h:+.2f}% drop already larger than the prediction")
             if side == "BUY" and abs(mom_1h) <= flat:
-                logger.info(f"{symbol}: BUY skipped — flat market ({mom_1h:+.2f}% over 1h)")
                 return _no(f"Momentum filter: BUY in a flat market ({mom_1h:+.2f}% 1h)")
 
     if struct_state and struct_state.confirmed:
@@ -946,15 +963,15 @@ async def _try_open_trade(
             atr_pct=atr_for_tp,
         )
 
-    # TP distance gate — must be at least 1.2% from entry to clear round-trip fees
+    # TP distance is a price percentage. Fees are 0.08% of price, so leverage
+    # must not be applied here. 0.6% is the day-trade floor above the round trip.
     tp_dist_pct = abs(take_profit - current_price) / current_price * 100
-    if not manual and tp_dist_pct < 1.2:
-        logger.debug(f"{symbol}: skip — TP only {tp_dist_pct:.2f}% from entry (need >=1.2%)")
+    if not manual and tp_dist_pct < 0.6:
+        logger.debug(f"{symbol}: skip — TP only {tp_dist_pct:.2f}% from entry (need >=0.6%)")
         return _no(f"TP only {tp_dist_pct:.2f}% away")
 
-    # Fee-based required edge: round-trip taker fee × leverage + 0.8pp slippage margin
     round_trip_cost_pct = settings.taker_fee_rate * 2 * 100
-    required_edge_pct = round_trip_cost_pct * lev + 0.8
+    required_edge_pct = round_trip_cost_pct + 0.15
     if not manual and tp_dist_pct < required_edge_pct:
         logger.debug(f"{symbol}: skip — TP {tp_dist_pct:.2f}% below required edge {required_edge_pct:.2f}%")
         return _no(f"TP {tp_dist_pct:.2f}% below required edge {required_edge_pct:.2f}%")
@@ -1412,8 +1429,20 @@ async def run_trading_engine(
             open_symbols = [p["symbol"] for p in positions]
 
             daily_pnl = await risk.get_daily_pnl()
+            daily_pnl_usdt = await risk.get_daily_pnl_usdt()
             daily_trade_count = await risk.get_daily_trade_count()
             open_count = len(positions)
+            day_target_hit = (
+                daily_pnl_usdt >= settings.daily_profit_target_usdt
+                or daily_pnl >= settings.daily_target_percent
+            )
+            if day_target_hit and open_count == 0:
+                await risk.set_status("running", {
+                    "daily_pnl_pct": round(daily_pnl, 4),
+                    "note": "daily target reached — flat for the rest of the UTC day",
+                })
+                await asyncio.sleep(LOOP_INTERVAL)
+                continue
 
             confidence_threshold = params["confidence_threshold"]
 
