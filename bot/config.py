@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     allow_1h_only_if_research_stale: bool = False
     research_stale_minutes: int = 20
     max_prediction_age_minutes: int = 30
+    news_enabled: bool = True
+    news_poll_seconds: int = 120
+    news_max_age_minutes: int = 20
     patch_window_hours: int = 10
     patch_min_label_count: int = 4
     patch_auto_accept_tighten_only: bool = True

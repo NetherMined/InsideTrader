@@ -78,6 +78,45 @@ function TopHourTrades() {
   );
 }
 
+function NewsFeed() {
+  const [items, setItems] = useState<{ source: string; title: string; url: string; published: number; symbols: string[]; score: number }[]>([]);
+
+  useEffect(() => {
+    const load = () => api.news().then((res) => setItems(res.items || [])).catch(() => null);
+    load();
+    const id = setInterval(load, 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold">News feed</div>
+        <span className="text-xs" style={{ color: '#848e9c' }}>CryptoCompare + Binance</span>
+      </div>
+      {items.length === 0 ? (
+        <div className="text-xs py-4 text-center" style={{ color: '#848e9c' }}>Waiting for headlines</div>
+      ) : (
+        <div className="space-y-2">
+          {items.slice(0, 8).map((item, i) => (
+            <a key={`${item.url}-${i}`} href={item.url} target="_blank" rel="noopener noreferrer" className="block">
+              <div className="flex items-start justify-between gap-3">
+                <div className="text-xs" style={{ color: '#e8e8e8' }}>{item.title}</div>
+                <span className="text-xs shrink-0" style={{ color: item.score > 0 ? '#0ecb81' : item.score < 0 ? '#f6465d' : '#848e9c' }}>
+                  {item.score > 0 ? 'bull' : item.score < 0 ? 'bear' : 'flat'}
+                </span>
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: '#555' }}>
+                {item.source}{item.symbols.length ? ` · ${item.symbols.slice(0, 3).join(', ')}` : ''}
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StatCard({
   label,
   value,
@@ -516,6 +555,8 @@ export default function DashboardPage() {
       </div>
 
       <TopHourTrades />
+
+      <NewsFeed />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div

@@ -82,6 +82,7 @@ export const api = {
   modeBreakdown: () => get<ModeBreakdown>('/api/v1/stats/mode-breakdown'),
   recoveryStats: (hours = 24) => get<RecoveryStats>(`/api/v1/stats/recovery?hours=${hours}`),
   topHourTrades: () => get<{ hour: string; trades: { symbol: string; side: string; predicted_change_pct: number; confidence: number; current_price: number; target_price: number; predicted_at: string | null }[] }>('/api/v1/stats/top-hour'),
+  news: () => get<{ items: { source: string; title: string; url: string; published: number; symbols: string[]; score: number }[] }>('/api/v1/news'),
   getAccountBalances: () => get<AccountBalances>('/api/v1/account/balances'),
   convertAllToUsdt: () => post<{ ok: boolean; conversions: Array<{ asset: string; ok: boolean; usdt_received?: number; error?: string }> }>('/api/v1/account/convert-all'),
   getLiveMode: () => get<LiveMode>('/api/v1/settings/live-mode'),

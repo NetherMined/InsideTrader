@@ -821,8 +821,15 @@ async def _try_open_trade(
                 logger.debug(f"{symbol}: gate reject — {decision.reason}")
                 return _no(f"Gate: {decision.reason}")
             side = decision.side
-            # Apply researcher confidence adjustment from the gate
             effective_confidence *= decision.confidence_adj
+            if settings.news_enabled:
+                from bot.news.feed import get_news_bias
+                news = await get_news_bias(redis, symbol)
+                if news and abs(int(news.get("score") or 0)) >= 2:
+                    if news.get("side") != side:
+                        return _no(f"News contradicts {side}: {news.get('title', '')[:80]}")
+                    effective_confidence = min(0.95, effective_confidence + 0.05)
+                    logger.info(f"{symbol}: news agrees {side} — {news.get('title', '')[:80]}")
             if decision.confidence_adj != 1.0:
                 logger.debug(f"{symbol}: researcher conf adj {decision.confidence_adj:.2f} → effective {effective_confidence:.2f}")
             if decision.packet:

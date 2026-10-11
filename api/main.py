@@ -1612,6 +1612,17 @@ async def get_top_hour_trades():
     return {"hour": hour.isoformat(), "trades": trades}
 
 
+@app.get("/api/v1/news")
+async def get_news_feed():
+    redis = await get_redis()
+    try:
+        raw = await redis.get("news:feed")
+        items = json.loads(raw) if raw else []
+        return {"items": items[:20]}
+    finally:
+        await redis.aclose()
+
+
 @app.get("/api/v1/stats/recovery")
 async def get_recovery_stats(hours: int = Query(24, ge=1, le=720)):
     """Post-exit recovery data from the 1m researcher, grouped by close reason."""

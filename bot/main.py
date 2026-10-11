@@ -29,6 +29,7 @@ from bot.analysis.trainer import run_analysis, force_retrain_models
 from bot.trading.executor import run_trading_engine
 from bot.research.loop import run_researcher_loop
 from bot.research.recovery import run_recovery_loop
+from bot.news.feed import run_news_loop
 
 LOG_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
@@ -273,6 +274,7 @@ async def main() -> None:
         asyncio.create_task(_guarded("heartbeat", lambda: heartbeat(redis, stop_event))),
         asyncio.create_task(_guarded("researcher", lambda: run_researcher_loop(ranked_store, redis, stop_event))),
         asyncio.create_task(_guarded("recovery_researcher", lambda: run_recovery_loop(stop_event))),
+        asyncio.create_task(_guarded("news", lambda: run_news_loop(pairs, redis, stop_event))),
     ]
     try:
         await asyncio.gather(*tasks)
