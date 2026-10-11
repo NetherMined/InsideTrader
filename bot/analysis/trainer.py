@@ -54,7 +54,17 @@ async def _load_candles(symbol: str, timeframe: str) -> pd.DataFrame:
     df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
-    return df
+    return closed_candles(df, timeframe)
+
+
+def closed_candles(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Drop the candle that is still forming. The model trains on closed
+    candles only, so a half-built one would feed it features it never saw."""
+    if df.empty:
+        return df
+    span = pd.Timedelta(timeframe.replace("m", "min")) if timeframe.endswith("m") else pd.Timedelta(timeframe)
+    cutoff = pd.Timestamp.now(tz="UTC") - span
+    return df[df["open_time"] <= cutoff].reset_index(drop=True)
 
 
 async def _save_prediction(symbol: str, current_price: float, target_price: float,
@@ -305,6 +315,7 @@ async def force_retrain_models(symbols: list[str]) -> None:
             df_raw["open_time"] = pd.to_datetime(df_raw["open_time"], utc=True)
             for col in ["open", "high", "low", "close", "volume"]:
                 df_raw[col] = df_raw[col].astype(float)
+            df_raw = closed_candles(df_raw, settings.analysis_timeframe)
 
             df = add_indicators(df_raw)
             _tf_target = {"5m": 0.1, "15m": 0.25, "30m": 0.5, "1h": 1.0, "4h": 4.0}

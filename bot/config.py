@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     require_15m_confirm: bool = False
     allow_1h_only_if_research_stale: bool = False
     research_stale_minutes: int = 20
+    max_prediction_age_minutes: int = 30
     patch_window_hours: int = 10
     patch_min_label_count: int = 4
     patch_auto_accept_tighten_only: bool = True

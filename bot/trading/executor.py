@@ -720,6 +720,7 @@ async def _try_open_trade(
             return _no("Prices are stale")
         if not await _candle_is_fresh(symbol):
             return _no("1h candle is older than 2 hours")
+    if not manual and abs(pair.predicted_change_pct) < 1.0:
         return _no(f"Predicted move {pair.predicted_change_pct:+.2f}% under 1%")
 
     # Per-symbol learning — throttle size on poor performers, block only the worst
@@ -1486,6 +1487,12 @@ async def run_trading_engine(
             await _process_manual_opens(
                 ranked_store, open_symbols, capital, redis, risk, params, funding_rates,
             )
+
+            # A 1h prediction is only worth acting on early in its hour.
+            as_of = ranked_store.get("as_of")
+            pred_age_min = (datetime.now(timezone.utc) - as_of).total_seconds() / 60 if as_of else None
+            if pred_age_min is None or pred_age_min > settings.max_prediction_age_minutes:
+                ranked_filtered = []
 
             _tried = 0
             _rejects: dict[str, str] = {}

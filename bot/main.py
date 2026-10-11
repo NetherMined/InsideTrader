@@ -14,7 +14,7 @@ Startup sequence:
 import asyncio
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import ccxt.async_support as ccxt
 import redis.asyncio as aioredis
@@ -97,11 +97,21 @@ def _make_redis() -> aioredis.Redis:
     return aioredis.from_url(url, encoding="utf-8", decode_responses=True)
 
 
+def _hour_start() -> datetime:
+    """Close time of the newest 1h candle the predictions were built from."""
+    return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
 async def hourly_refresh(
     pairs: list[str], redis: aioredis.Redis, stop_event: asyncio.Event, ranked_store: dict
 ) -> None:
     while not stop_event.is_set():
-        await asyncio.sleep(3600)
+        # Run just after each 1h candle closes, so predictions start from the newest closed candle.
+        now = datetime.now(timezone.utc)
+        next_run = now.replace(minute=1, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(hours=1)
+        await asyncio.sleep((next_run - now).total_seconds())
         if stop_event.is_set():
             break
         logger.info("Hourly refresh: scanning + re-analysis...")
@@ -114,6 +124,7 @@ async def hourly_refresh(
                 await fetch_recent(refreshed, settings.research_timeframe)
             ranked = await run_analysis(refreshed)
             ranked_store["pairs"] = ranked
+            ranked_store["as_of"] = _hour_start()
             logger.info(f"Hourly refresh complete — {len(ranked)} ranked pairs (engine updated)")
             try:
                 from bot.analysis.ranker import fetch_pair_correlations
@@ -233,6 +244,7 @@ async def main() -> None:
         logger.info("Running analysis engine...")
         ranked = await run_analysis(pairs)
         ranked_store["pairs"] = ranked
+        ranked_store["as_of"] = _hour_start()
         logger.info(f"Analysis complete — {len(ranked)} ranked opportunities")
 
         logger.info("Computing initial correlation matrix...")
