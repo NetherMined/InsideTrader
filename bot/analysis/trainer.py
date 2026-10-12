@@ -26,6 +26,7 @@ from bot.db.connection import async_session
 from bot.analysis.indicators import add_indicators, MIN_ROWS
 from bot.analysis.features import engineer_features, get_X, get_X_y
 from bot.analysis.model import PricePredictor
+from bot.analysis.ensemble import EnsemblePredictor
 from bot.analysis.mode_classifier import classify_mode, mode_reason
 from bot.analysis.ranker import rank_pairs, RankedPair
 from bot.analysis.backtest import run_backtest
@@ -145,7 +146,28 @@ async def _analyse_symbol(symbol: str) -> dict | None:
         logger.debug(f"{symbol}: latest feature row has NaN values, skipping prediction")
         return None
 
-    predicted_change_pct, confidence = await asyncio.to_thread(predictor.predict, X_latest)
+    # Ensemble voting (XGB + LGBM + CatBoost) on fee-threshold move
+    ens = EnsemblePredictor(symbol)
+    ens_loaded = ens.load()
+    if not ens_loaded or ens.is_stale():
+        # Build fee-aware labels from short horizon
+        if "fwd_fee_up" in feat_df.columns:
+            y_fee = feat_df.loc[X.index, "fwd_fee_up"].fillna(0).astype(int)
+        else:
+            y_fee = y_cls
+        regime_y = (feat_df.loc[X.index, "adx"] > 25).astype(int) if "adx" in feat_df.columns else None
+        await asyncio.to_thread(ens.train, X, y_fee, regime_y)
+        ens.save()
+    ens_result = await asyncio.to_thread(ens.predict, X_latest)
+    predicted_change_pct = float(ens_result.get("direction", 0)) * 0.5  # sign * nominal size
+    confidence = float(ens_result.get("confidence", 0.0))
+    if ens_result.get("momentum_score", 0) > 0.6:
+        confidence = min(0.92, confidence * 1.05)
+    logger.info(
+        f"{symbol}: ensemble votes={ens_result.get('votes')} "
+        f"dir={ens_result.get('direction')} conf={confidence:.2f} "
+        f"momentum={ens_result.get('momentum_score', 0):.2f} regime={ens_result.get('regime')}"
+    )
 
     latest = feat_df.dropna(subset=["atr", "adx"]).iloc[-1]
     atr_pct = float(latest.get("atr_pct", 0.0)) if "atr_pct" in latest else 0.0
@@ -271,6 +293,7 @@ async def run_analysis(symbols: list[str]) -> list[RankedPair]:
 async def force_retrain_models(symbols: list[str]) -> None:
     """Force retrain all symbol models with latest data."""
     from bot.analysis.model import PricePredictor
+from bot.analysis.ensemble import EnsemblePredictor
     from bot.analysis.features import engineer_features, get_X, get_X_y
     from bot.analysis.indicators import add_indicators
     from bot.db.connection import async_session
