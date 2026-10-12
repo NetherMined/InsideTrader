@@ -76,6 +76,10 @@ FEATURE_COLS = [
 ]
 
 FORWARD_HOURS = 24
+# Short-horizon classification target (bars). On 1h data this is the next candle;
+# on 15m data it covers ~15 minutes. Label is 1 if absolute move exceeds fee threshold.
+SHORT_FORWARD_BARS = 1
+FEE_THRESHOLD_PCT = 0.28  # round-trip taker fees ~0.28%
 
 _7D_PERIODS = 7 * 24    # 168 hourly candles
 _30D_PERIODS = 30 * 24  # 720 hourly candles
@@ -256,6 +260,12 @@ def engineer_features(df: pd.DataFrame, target_pct: float = 1.0) -> pd.DataFrame
     # Forward return targets
     df["fwd_ret"] = df["close"].pct_change(FORWARD_HOURS).shift(-FORWARD_HOURS) * 100
     df["fwd_up"] = (df["fwd_ret"] > target_pct).astype(int)
+
+    # Short-horizon fee-aware classification label (used by ensemble)
+    short_ret = df["close"].pct_change(SHORT_FORWARD_BARS).shift(-SHORT_FORWARD_BARS) * 100
+    df["fwd_short"] = short_ret
+    df["fwd_fee_up"] = (short_ret > FEE_THRESHOLD_PCT).astype(int)
+    df["fwd_fee_down"] = (short_ret < -FEE_THRESHOLD_PCT).astype(int)
 
     df = df.replace([np.inf, -np.inf], np.nan)
 
