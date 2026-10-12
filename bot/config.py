@@ -24,10 +24,12 @@ class Settings(BaseSettings):
 
     # Ensemble stacking (FeaturesGrok)
     ensemble_enabled: bool = True
+    ensemble_timeframe: str = "15m"           # true 15-minute horizon for fee label
     ensemble_fee_threshold_pct: float = 0.28  # classify moves larger than round-trip fees
-    ensemble_horizon_bars: int = 1            # short-horizon bars for fee label
+    ensemble_horizon_bars: int = 1            # 1 bar of 15m = 15 minutes
     lightgbm_momentum_enabled: bool = True
     catboost_regime_enabled: bool = True
+    momentum_timeframe: str = "1m"            # short-term momentum candles
     starting_capital_usdt: float = 100.0
 
     futures_confidence_threshold: float = 0.55

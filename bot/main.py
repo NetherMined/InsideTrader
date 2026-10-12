@@ -110,6 +110,9 @@ async def hourly_refresh(
             await fetch_recent(refreshed, settings.analysis_timeframe)
             if settings.research_enabled:
                 await fetch_recent(refreshed, settings.research_timeframe)
+            if settings.ensemble_enabled:
+                await fetch_recent(refreshed, settings.ensemble_timeframe)
+                await fetch_recent(refreshed, settings.momentum_timeframe)
             ranked = await run_analysis(refreshed)
             ranked_store["pairs"] = ranked
             logger.info(f"Hourly refresh complete — {len(ranked)} ranked pairs (engine updated)")
@@ -170,6 +173,11 @@ async def main() -> None:
     if settings.research_enabled:
         logger.info(f"Fetching {settings.research_timeframe} candles for researcher (capped lookback)...")
         await fetch_historical(pairs, settings.research_timeframe)
+    if settings.ensemble_enabled:
+        logger.info(f"Fetching {settings.ensemble_timeframe} candles for ensemble 15m target...")
+        await fetch_historical(pairs, settings.ensemble_timeframe)
+        logger.info(f"Fetching {settings.momentum_timeframe} candles for LightGBM momentum...")
+        await fetch_historical(pairs, settings.momentum_timeframe)
 
     logger.info("Running analysis engine...")
     ranked = await run_analysis(pairs)
