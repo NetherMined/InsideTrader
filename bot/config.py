@@ -19,60 +19,60 @@ class Settings(BaseSettings):
 
     trading_mode: str = "FUTURES"
     trading_pairs: str = "AUTO"
-    analysis_timeframe: str = "1h"
+    analysis_timeframe: str = "5m"  # Scalping: 5m primary, 1m fine-tune
     futures_leverage: int = 5
     starting_capital_usdt: float = 100.0
 
-    futures_confidence_threshold: float = 0.55
-    volatility_futures_cap_percent: float = 5.0
-    adx_futures_threshold: float = 25.0
+    futures_confidence_threshold: float = 0.52
+    volatility_futures_cap_percent: float = 4.0
+    adx_futures_threshold: float = 20.0
 
     daily_target_percent: float = 3.0
     daily_profit_target_usdt: float = 100.0
-    confidence_threshold: float = 0.62
-    stop_loss_percent: float = 0.6
-    take_profit_percent: float = 1.0
+    confidence_threshold: float = 0.55
+    stop_loss_percent: float = 0.4   # Tight for scalps
+    take_profit_percent: float = 0.8  # Quick target
     daily_loss_limit_percent: float = 5.0
-    min_predicted_move_pct: float = 0.2
+    min_predicted_move_pct: float = 0.15
     momentum_filter_enabled: bool = True
-    momentum_flat_pct: float = 0.3
+    momentum_flat_pct: float = 0.15
     cost_gate_enabled: bool = True
-    max_roundtrip_cost_pct: float = 0.20
-    loss_pause_after: int = 3
-    loss_pause_minutes: int = 30
-    loss_pause_max_minutes: int = 120
+    max_roundtrip_cost_pct: float = 0.15  # Stricter for high-frequency
+    loss_pause_after: int = 4
+    loss_pause_minutes: int = 15
+    loss_pause_max_minutes: int = 60
     loss_half_size_after: int = 3
-    loss_material_pct: float = 0.5
-    loss_state_ttl_hours: int = 6
-    negative_trade_timeout_minutes: int = 30
+    loss_material_pct: float = 0.4
+    loss_state_ttl_hours: int = 4
+    negative_trade_timeout_minutes: int = 10
     taker_fee_rate: float = 0.0004
 
-    heat_limit_pct: float = 25.0
-    max_single_symbol_heat_pct: float = 25.0
-    max_trade_margin_usdt: float = 0.0  # 0 = no dollar cap; one trade risks about 1% of equity
+    heat_limit_pct: float = 30.0
+    max_single_symbol_heat_pct: float = 15.0
+    max_trade_margin_usdt: float = 0.0
 
-    min_rr_ratio: float = 1.5
-    zone_sl_max_pct: float = 1.2
-    zone_sl_buffer_atr: float = 0.15
-    zone_proximity_atr: float = 1.0
-    swing_lookback: int = 3
-    structure_cache_ttl: int = 900
+    min_rr_ratio: float = 1.3
+    zone_sl_max_pct: float = 0.8
+    zone_sl_buffer_atr: float = 0.1
+    zone_proximity_atr: float = 0.8
+    swing_lookback: int = 2
+    structure_cache_ttl: int = 180  # Shorter cache for lower TF
 
     paper_trading_mode: bool = True
     research_enabled: bool = True
-    research_timeframe: str = "15m"
-    research_min_confidence: float = 0.55
+    research_timeframe: str = "5m"
+    research_min_confidence: float = 0.50
     require_15m_confirm: bool = False
-    allow_1h_only_if_research_stale: bool = False
-    research_stale_minutes: int = 20
-    max_prediction_age_minutes: int = 30
-    news_enabled: bool = True
+    allow_1h_only_if_research_stale: bool = True
+    research_stale_minutes: int = 8
+    max_prediction_age_minutes: int = 8
+    news_enabled: bool = False  # Avoid noise for pure scalping
     news_poll_seconds: int = 120
-    news_max_age_minutes: int = 20
-    patch_window_hours: int = 10
-    patch_min_label_count: int = 4
+    news_max_age_minutes: int = 10
+    patch_window_hours: int = 4
+    patch_min_label_count: int = 3
     patch_auto_accept_tighten_only: bool = True
-    patch_expiry_hours: int = 48
+    patch_expiry_hours: int = 24
     live_trading_enabled: bool = False
 
     postgres_host: str = "localhost"
@@ -131,5 +131,5 @@ settings = Settings()
 
 
 def get_mode_limits(mode: str) -> dict:
-    """Futures-only. Spot is disabled; mode argument is ignored."""
-    return {"max_simultaneous": 1}
+    """Futures-only. Allow more concurrent for scalping."""
+    return {"max_simultaneous": 3}
