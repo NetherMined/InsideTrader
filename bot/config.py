@@ -19,54 +19,54 @@ class Settings(BaseSettings):
 
     trading_mode: str = "FUTURES"
     trading_pairs: str = "AUTO"
-    analysis_timeframe: str = "5m"  # Scalping: 5m primary, 1m fine-tune
+    analysis_timeframe: str = "5m"  # Scalping: 5m primary
     futures_leverage: int = 5
     starting_capital_usdt: float = 100.0
 
-    futures_confidence_threshold: float = 0.52
+    futures_confidence_threshold: float = 0.58
     volatility_futures_cap_percent: float = 4.0
-    adx_futures_threshold: float = 20.0
+    adx_futures_threshold: float = 22.0
 
     daily_target_percent: float = 3.0
     daily_profit_target_usdt: float = 100.0
-    confidence_threshold: float = 0.55
-    stop_loss_percent: float = 0.4   # Tight for scalps
-    take_profit_percent: float = 0.8  # Quick target
+    confidence_threshold: float = 0.62
+    stop_loss_percent: float = 0.5   # Slightly wider than ultra-tight scalp
+    take_profit_percent: float = 1.2  # Wider to clear fees + room
     daily_loss_limit_percent: float = 5.0
-    min_predicted_move_pct: float = 0.15
+    min_predicted_move_pct: float = 0.40  # Must clear round-trip costs
     momentum_filter_enabled: bool = True
-    momentum_flat_pct: float = 0.15
+    momentum_flat_pct: float = 0.25
     cost_gate_enabled: bool = True
-    max_roundtrip_cost_pct: float = 0.15  # Stricter for high-frequency
+    max_roundtrip_cost_pct: float = 0.20
     loss_pause_after: int = 4
     loss_pause_minutes: int = 15
     loss_pause_max_minutes: int = 60
     loss_half_size_after: int = 3
-    loss_material_pct: float = 0.4
+    loss_material_pct: float = 0.5
     loss_state_ttl_hours: int = 4
-    negative_trade_timeout_minutes: int = 10
+    negative_trade_timeout_minutes: int = 12
     taker_fee_rate: float = 0.0004
 
     heat_limit_pct: float = 30.0
     max_single_symbol_heat_pct: float = 15.0
     max_trade_margin_usdt: float = 0.0
 
-    min_rr_ratio: float = 1.3
-    zone_sl_max_pct: float = 0.8
+    min_rr_ratio: float = 1.4
+    zone_sl_max_pct: float = 0.9
     zone_sl_buffer_atr: float = 0.1
     zone_proximity_atr: float = 0.8
     swing_lookback: int = 2
-    structure_cache_ttl: int = 180  # Shorter cache for lower TF
+    structure_cache_ttl: int = 180
 
     paper_trading_mode: bool = True
     research_enabled: bool = True
     research_timeframe: str = "5m"
-    research_min_confidence: float = 0.50
+    research_min_confidence: float = 0.55
     require_15m_confirm: bool = False
     allow_1h_only_if_research_stale: bool = True
     research_stale_minutes: int = 8
     max_prediction_age_minutes: int = 8
-    news_enabled: bool = False  # Avoid noise for pure scalping
+    news_enabled: bool = False
     news_poll_seconds: int = 120
     news_max_age_minutes: int = 10
     patch_window_hours: int = 4
