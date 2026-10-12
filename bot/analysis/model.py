@@ -15,15 +15,17 @@ from sklearn.metrics import mean_absolute_error, accuracy_score
 from loguru import logger
 
 from bot.analysis.features import FEATURE_COLS
+from bot.config import settings
 
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
-MIN_TRAIN_ROWS = 500  # raised from 300 — avoids overfitting to short bearish/bullish windows
-MODEL_MAX_AGE_HOURS = 24  # force retrain after 24h so models don't stay biased to old regimes
+MIN_TRAIN_ROWS = 500
+MODEL_MAX_AGE_HOURS = 24
 
 
 class PricePredictor:
-    def __init__(self, symbol: str):
+    def __init__(self, symbol: str, timeframe: str | None = None):
         self.symbol = symbol
+        self.timeframe = timeframe or settings.analysis_timeframe
         self._regressor = XGBRegressor(
             n_estimators=300,
             max_depth=6,
@@ -55,8 +57,16 @@ class PricePredictor:
         self._feature_cols: list[str] = []
         self._train_count = 0
 
+    def _paths(self) -> tuple[str, str, str]:
+        safe_symbol = self.symbol.replace("/", "_")
+        tf = self.timeframe.replace("/", "_")
+        return (
+            os.path.join(MODELS_DIR, f"{safe_symbol}_{tf}_reg.pkl"),
+            os.path.join(MODELS_DIR, f"{safe_symbol}_{tf}_cls.pkl"),
+            os.path.join(MODELS_DIR, f"{safe_symbol}_{tf}_cols.pkl"),
+        )
+
     def train(self, X: pd.DataFrame, y_reg: pd.Series, y_cls: pd.Series) -> dict:
-        """Fit both models. Returns evaluation metrics."""
         if len(X) < MIN_TRAIN_ROWS:
             logger.warning(f"{self.symbol}: insufficient data ({len(X)} rows < {MIN_TRAIN_ROWS})")
             return {}
@@ -67,7 +77,6 @@ class PricePredictor:
             X, y_reg, y_cls, test_size=0.2, shuffle=False
         )
 
-        # Balance classes so model doesn't learn to predict whichever direction dominates recent history
         pos_count = int((yc_train == 1).sum())
         neg_count = int((yc_train == 0).sum())
         if pos_count > 0 and neg_count > 0:
@@ -105,11 +114,6 @@ class PricePredictor:
         return metrics
 
     def predict(self, X: pd.DataFrame) -> tuple[float, float]:
-        """Return (predicted_change_pct, confidence).
-
-        Confidence is the classifier's probability of a correct directional move,
-        capped at 0.92 to prevent overconfident predictions from dominating sizing.
-        """
         if not self._trained:
             return 0.0, 0.0
 
@@ -141,9 +145,7 @@ class PricePredictor:
         return predicted_change, confidence
 
     def is_stale(self, max_age_hours: int = MODEL_MAX_AGE_HOURS) -> bool:
-        """Return True if the saved model is older than max_age_hours."""
-        safe_symbol = self.symbol.replace("/", "_")
-        reg_path = os.path.join(MODELS_DIR, f"{safe_symbol}_reg.pkl")
+        reg_path, _, _ = self._paths()
         if not os.path.exists(reg_path):
             return True
         age_hours = (time.time() - os.path.getmtime(reg_path)) / 3600
@@ -151,16 +153,13 @@ class PricePredictor:
 
     def save(self) -> None:
         os.makedirs(MODELS_DIR, exist_ok=True)
-        safe_symbol = self.symbol.replace("/", "_")
-        joblib.dump(self._regressor, os.path.join(MODELS_DIR, f"{safe_symbol}_reg.pkl"))
-        joblib.dump(self._classifier, os.path.join(MODELS_DIR, f"{safe_symbol}_cls.pkl"))
-        joblib.dump(self._feature_cols, os.path.join(MODELS_DIR, f"{safe_symbol}_cols.pkl"))
+        reg_path, cls_path, cols_path = self._paths()
+        joblib.dump(self._regressor, reg_path)
+        joblib.dump(self._classifier, cls_path)
+        joblib.dump(self._feature_cols, cols_path)
 
     def load(self) -> bool:
-        safe_symbol = self.symbol.replace("/", "_")
-        reg_path = os.path.join(MODELS_DIR, f"{safe_symbol}_reg.pkl")
-        cls_path = os.path.join(MODELS_DIR, f"{safe_symbol}_cls.pkl")
-        cols_path = os.path.join(MODELS_DIR, f"{safe_symbol}_cols.pkl")
+        reg_path, cls_path, cols_path = self._paths()
 
         if not all(os.path.exists(p) for p in [reg_path, cls_path, cols_path]):
             return False
