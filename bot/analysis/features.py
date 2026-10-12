@@ -77,15 +77,26 @@ FEATURE_COLS = [
 
 FORWARD_HOURS = 1  # hold horizon, not a 24h forecast. Overridden per timeframe below.
 
-_7D_PERIODS = 7 * 24    # 168 hourly candles
-_30D_PERIODS = 30 * 24  # 720 hourly candles
-_1Y_PERIODS = 365 * 24  # 8760 hourly candles
+
+def _periods_for_days(days: int) -> int:
+    """Return number of bars for the given number of calendar days on the active analysis timeframe."""
+    from bot.config import settings
+    bars_per_hour = {
+        "1m": 60, "5m": 12, "15m": 4,
+        "30m": 2, "1h": 1, "4h": 0.25,
+    }.get(settings.analysis_timeframe, 1)
+    return max(1, int(days * 24 * bars_per_hour))
+
+
+_7D_PERIODS = _periods_for_days(7)
+_30D_PERIODS = _periods_for_days(30)
+_1Y_PERIODS = _periods_for_days(365)
 
 
 def _forward_bars() -> int:
     """Bars ahead that match the trade hold, not a next-day forecast."""
     from bot.config import settings
-    return {"5m": 12, "15m": 4, "30m": 2, "1h": 1, "4h": 1}.get(settings.analysis_timeframe, 1)
+    return {"1m": 30, "5m": 12, "15m": 4, "30m": 2, "1h": 1, "4h": 1}.get(settings.analysis_timeframe, 1)
 
 
 def _add_structure_features(df: pd.DataFrame, tail: int | None = None) -> pd.DataFrame:
@@ -191,7 +202,7 @@ def engineer_features(df: pd.DataFrame, target_pct: float = 1.0, structure_tail:
     df["ret_4"] = df["close"].pct_change(4) * 100
     df["ret_24"] = df["close"].pct_change(24) * 100
 
-    # Multi-timeframe returns
+    # Multi-timeframe returns (now timeframe-aware)
     df["ret_7d"] = df["close"].pct_change(_7D_PERIODS) * 100
     df["ret_30d"] = df["close"].pct_change(_30D_PERIODS) * 100
     df["ret_1y"] = df["close"].pct_change(_1Y_PERIODS) * 100
