@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     stop_loss_percent: float = 0.6
     take_profit_percent: float = 1.0
     daily_loss_limit_percent: float = 5.0
-    min_predicted_move_pct: float = 0.5
+    min_predicted_move_pct: float = 0.2
     momentum_filter_enabled: bool = True
     momentum_flat_pct: float = 0.3
     cost_gate_enabled: bool = True

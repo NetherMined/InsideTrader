@@ -94,9 +94,11 @@ async def _save_prediction(symbol: str, current_price: float, target_price: floa
         await session.commit()
 
 
-def _prepare_features(df_raw: pd.DataFrame, target_pct: float) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+def _prepare_features(
+    df_raw: pd.DataFrame, target_pct: float, structure_tail: int | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     df = add_indicators(df_raw)
-    feat_df = engineer_features(df, target_pct=target_pct)
+    feat_df = engineer_features(df, target_pct=target_pct, structure_tail=structure_tail)
     X, y_reg, y_cls = get_X_y(feat_df)
     return df, feat_df, X, y_reg, y_cls
 
@@ -109,12 +111,6 @@ async def _analyse_symbol(symbol: str) -> dict | None:
 
     _timeframe_target = {"5m": 0.1, "15m": 0.25, "30m": 0.5, "1h": 1.0, "4h": 4.0}
     _target_pct = _timeframe_target.get(settings.analysis_timeframe, settings.daily_target_percent / 2)
-    df, feat_df, X, y_reg, y_cls = await asyncio.to_thread(
-        _prepare_features, df_raw, _target_pct
-    )
-    if len(X) < 100:
-        logger.debug(f"{symbol}: not enough clean rows ({len(X)}), skipping")
-        return None
 
     predictor = PricePredictor(symbol)
     loaded = predictor.load()
@@ -123,6 +119,14 @@ async def _analyse_symbol(symbol: str) -> dict | None:
     if loaded and predictor.is_stale():
         logger.info(f"{symbol}: model is stale (>24h), retraining with latest data")
         loaded = False
+
+    # A loaded model only needs the newest row, so skip structure work on old history.
+    df, feat_df, X, y_reg, y_cls = await asyncio.to_thread(
+        _prepare_features, df_raw, _target_pct, 200 if loaded else None
+    )
+    if len(X) < 100:
+        logger.debug(f"{symbol}: not enough clean rows ({len(X)}), skipping")
+        return None
 
     if not loaded:
         split = int(len(X) * 0.8)

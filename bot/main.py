@@ -112,7 +112,9 @@ async def hourly_refresh(
         next_run = now.replace(minute=1, second=0, microsecond=0)
         if next_run <= now:
             next_run += timedelta(hours=1)
-        await asyncio.sleep((next_run - now).total_seconds())
+        # Poll the wall clock: a long sleep does not count time while the host is suspended.
+        while not stop_event.is_set() and datetime.now(timezone.utc) < next_run:
+            await asyncio.sleep(30)
         if stop_event.is_set():
             break
         logger.info("Hourly refresh: scanning + re-analysis...")

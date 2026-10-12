@@ -1528,6 +1528,9 @@ async def run_trading_engine(
             as_of = ranked_store.get("as_of")
             pred_age_min = (datetime.now(timezone.utc) - as_of).total_seconds() / 60 if as_of else None
             if pred_age_min is None or pred_age_min > settings.max_prediction_age_minutes:
+                if ranked_filtered and _loop_count % 60 == 0:
+                    age_txt = f"{pred_age_min:.0f} min old" if pred_age_min is not None else "not ready"
+                    logger.info(f"No new entries — predictions are {age_txt} (limit {settings.max_prediction_age_minutes} min)")
                 ranked_filtered = []
 
             _tried = 0

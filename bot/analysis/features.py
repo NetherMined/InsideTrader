@@ -88,12 +88,13 @@ def _forward_bars() -> int:
     return {"5m": 12, "15m": 4, "30m": 2, "1h": 1, "4h": 1}.get(settings.analysis_timeframe, 1)
 
 
-def _add_structure_features(df: pd.DataFrame) -> pd.DataFrame:
+def _add_structure_features(df: pd.DataFrame, tail: int | None = None) -> pd.DataFrame:
     """Append structure features using only bars up to each row.
 
     A single classification of the full frame would leak today's trend into
     every historical row. Structure is computed on a trailing window at a
-    stride, then forward-filled.
+    stride, then forward-filled. tail limits the work to the last rows, on the
+    same stride grid, for prediction passes that only read the newest row.
     """
     try:
         from bot.analysis.structure import classify_structure, detect_zones
@@ -125,8 +126,11 @@ def _add_structure_features(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     window, step = 80, 6
-    last = 0
-    for end in range(59, n, step):
+    first_end = 59
+    if tail is not None and n - tail > first_end:
+        first_end += -(-(n - tail - first_end) // step) * step
+    last = 0 if first_end == 59 else first_end - step + 1
+    for end in range(first_end, n, step):
         start = max(0, end + 1 - window)
         view = df.iloc[start:end + 1]
         try:
@@ -171,7 +175,7 @@ def _add_structure_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def engineer_features(df: pd.DataFrame, target_pct: float = 1.0) -> pd.DataFrame:
+def engineer_features(df: pd.DataFrame, target_pct: float = 1.0, structure_tail: int | None = None) -> pd.DataFrame:
     df = df.copy()
 
     df["atr_pct"] = (df["atr"] / df["close"] * 100).replace([np.inf, -np.inf], np.nan)
@@ -268,7 +272,7 @@ def engineer_features(df: pd.DataFrame, target_pct: float = 1.0) -> pd.DataFrame
     df["rsi_oversold"] = (df["rsi"] < 35).astype(float)
     df["rsi_overbought"] = (df["rsi"] > 70).astype(float)
 
-    df = _add_structure_features(df)
+    df = _add_structure_features(df, tail=structure_tail)
 
     # Forward return over the hold. Class is the sign, not "up more than 1%".
     bars = _forward_bars()
@@ -286,7 +290,7 @@ def get_X(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_X_y(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
-    feat_df = engineer_features(df)
+    feat_df = df if "fwd_ret" in df.columns else engineer_features(df)
     cols = [c for c in FEATURE_COLS if c in feat_df.columns] + ["fwd_ret", "fwd_up"]
     clean = feat_df[cols].dropna()
     X = clean[[c for c in FEATURE_COLS if c in clean.columns]]
