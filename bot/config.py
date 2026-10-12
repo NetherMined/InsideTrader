@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     trading_pairs: str = "AUTO"
     analysis_timeframe: str = "1h"
     futures_leverage: int = 5
+
+    # Ensemble stacking (FeaturesGrok)
+    ensemble_enabled: bool = True
+    ensemble_fee_threshold_pct: float = 0.28  # classify moves larger than round-trip fees
+    ensemble_horizon_bars: int = 1            # short-horizon bars for fee label
+    lightgbm_momentum_enabled: bool = True
+    catboost_regime_enabled: bool = True
     starting_capital_usdt: float = 100.0
 
     futures_confidence_threshold: float = 0.55
