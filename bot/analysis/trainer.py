@@ -93,7 +93,12 @@ def _prepare_features(df_raw: pd.DataFrame, target_pct: float) -> tuple[pd.DataF
 
 
 async def _analyse_symbol(symbol: str) -> dict | None:
+    # Primary analysis still on the configured timeframe (1h for structure/regime)
     df_raw = await _load_candles(symbol, settings.analysis_timeframe)
+    # Parallel 15m series for the ensemble fee-threshold target
+    df_15m = pd.DataFrame()
+    if settings.ensemble_enabled and settings.ensemble_timeframe != settings.analysis_timeframe:
+        df_15m = await _load_candles(symbol, settings.ensemble_timeframe)
     if len(df_raw) < MIN_ROWS:
         logger.debug(f"{symbol}: not enough candles ({len(df_raw)}), skipping")
         return None
@@ -146,19 +151,28 @@ async def _analyse_symbol(symbol: str) -> dict | None:
         logger.debug(f"{symbol}: latest feature row has NaN values, skipping prediction")
         return None
 
-    # Ensemble voting (XGB + LGBM + CatBoost) on fee-threshold move
+    # Ensemble voting on true 15-minute fee-threshold move
     ens = EnsemblePredictor(symbol)
     ens_loaded = ens.load()
+    X_ens, y_fee, regime_y = X, y_cls, None
+    X_latest_ens = X_latest
+    if not df_15m.empty and len(df_15m) >= 100:
+        try:
+            df15 = add_indicators(df_15m)
+            feat15 = engineer_features(df15, target_pct=settings.ensemble_fee_threshold_pct)
+            X15, _, y15 = get_X_y(feat15)
+            if len(X15) >= 100 and "fwd_fee_up" in feat15.columns:
+                X_ens = X15
+                y_fee = feat15.loc[X15.index, "fwd_fee_up"].fillna(0).astype(int)
+                regime_y = (feat15.loc[X15.index, "adx"] > 25).astype(int) if "adx" in feat15.columns else None
+                X_latest_ens = get_X(feat15.dropna(subset=["rsi", "adx", "atr"])).tail(1)
+                logger.debug(f"{symbol}: ensemble using 15m candles ({len(X15)} rows)")
+        except Exception as exc:
+            logger.debug(f"{symbol}: 15m ensemble prep failed ({exc}), falling back to primary TF")
     if not ens_loaded or ens.is_stale():
-        # Build fee-aware labels from short horizon
-        if "fwd_fee_up" in feat_df.columns:
-            y_fee = feat_df.loc[X.index, "fwd_fee_up"].fillna(0).astype(int)
-        else:
-            y_fee = y_cls
-        regime_y = (feat_df.loc[X.index, "adx"] > 25).astype(int) if "adx" in feat_df.columns else None
-        await asyncio.to_thread(ens.train, X, y_fee, regime_y)
+        await asyncio.to_thread(ens.train, X_ens, y_fee, regime_y)
         ens.save()
-    ens_result = await asyncio.to_thread(ens.predict, X_latest)
+    ens_result = await asyncio.to_thread(ens.predict, X_latest_ens)
     predicted_change_pct = float(ens_result.get("direction", 0)) * 0.5  # sign * nominal size
     confidence = float(ens_result.get("confidence", 0.0))
     if ens_result.get("momentum_score", 0) > 0.6:
