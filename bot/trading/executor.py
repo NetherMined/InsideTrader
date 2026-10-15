@@ -33,11 +33,16 @@ from bot.analysis.structure import (
     is_near_zone, compute_rr_ratio, StructureState, Zone,
 )
 from bot.trading.risk import RiskManager, COMMAND_KEY
-from bot.trading.sizing import calculate_position_size, calculate_sl_tp_prices, calculate_trade_heat
+from bot.trading.sizing import (
+    calculate_position_size, calculate_sl_tp_prices, calculate_trade_heat,
+    stop_distance_pct, max_stop_pct, clamp_stop, cap_take_profit,
+)
 from bot.trading.journal import (
     open_position, close_position, update_position_price, get_open_positions, update_position_tp, get_pnl_summary,
 )
 from bot.trading.paper import simulate_buy, simulate_sell, simulate_buy_back, simulate_sell_short
+from bot.trading.pnl import compute_pnl
+from bot.trading.invalidation import packet_invalidation, is_past_invalidation
 from bot.trading.orders import (
     place_spot_market_buy, place_spot_market_sell,
     place_futures_market_buy, place_futures_market_close, place_futures_market_sell,
@@ -55,7 +60,6 @@ _FUNDING_CACHE_KEY = "bot:funding_rates_cache"
 _FUNDING_CACHE_TTL = 300  # 5 minutes
 _CORR_CACHE_KEY = "bot:correlation_matrix"
 _CORR_CACHE_TTL = 3600  # 1 hour
-_SYMBOL_COOLDOWN_SECONDS = 300  # 5 min cooldown after closing a symbol before reopening
 _MACRO_TREND_CACHE_KEY = "bot:macro_trend_cache"
 _MACRO_TREND_CACHE_TTL = 120  # 2 minutes
 _STRUCTURE_CACHE_PREFIX = "structure:"
@@ -136,7 +140,6 @@ async def _get_macro_trend(redis: aioredis.Redis) -> str:
     return trend
 _TRAIL_ACTIVATION_PCT = 1.0    # arm trail once effective profit clears fees (~1% covers round-trip at 5x)
 _TRAIL_REVERSAL_PCT = 0.5      # trail by 0.5% effective from peak
-_MIN_PROFIT_USD = 2.00         # never close a winning trade below $2 PnL (non-SL)
 _TP_TRAIL_PREFIX = "bot:tp_trail:"  # TP follower anchor per position
 _FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"  # SPOT / FUTURES / DYNAMIC
 _DISABLE_FUTURES_BUY_KEY = "bot:disable_futures_buy"  # 1 = gate FUTURES BUY to SPOT BUY
@@ -281,6 +284,15 @@ async def _get_market_sentiment(redis: aioredis.Redis) -> tuple[str, float]:
     return "NEUTRAL", 0.5
 
 
+def _minutes_open(pos: dict) -> float | None:
+    opened_at = pos.get("opened_at")
+    if not isinstance(opened_at, datetime):
+        return None
+    if opened_at.tzinfo is None:
+        opened_at = opened_at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
+
+
 async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, params: dict, use_testnet: bool | None = None, capital: float = 0.0) -> None:
     positions = await get_open_positions()
 
@@ -302,13 +314,10 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         paper = bool(pos["paper_trade"])
         side = pos.get("side", "BUY")
 
-        if side == "BUY":
-            raw_pnl_pct = (current_price / entry_price - 1) * 100
-        else:
-            raw_pnl_pct = (entry_price - current_price) / entry_price * 100
-        effective_pnl_pct = raw_pnl_pct * leverage
-        notional = quantity * entry_price
-        pnl_usdt = notional * effective_pnl_pct / 100
+        live_pnl = compute_pnl(side, entry_price, current_price, quantity, leverage)
+        raw_pnl_pct = live_pnl.raw_pct
+        effective_pnl_pct = live_pnl.effective_pct
+        pnl_usdt = live_pnl.gross_usdt
 
         try:
             await update_position_price(pos_id, current_price, pnl_usdt)
@@ -361,7 +370,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 trail_raw_pct = _TRAIL_REVERSAL_PCT / max(leverage, 1)
                 if side == "BUY":
                     trail_trigger = new_best * (1 - trail_raw_pct / 100)
-                    if current_price < trail_trigger and pnl_usdt >= _MIN_PROFIT_USD:
+                    if current_price < trail_trigger and raw_pnl_pct >= settings.trail_min_profit_raw_pct:
                         close_reason = "trailing_stop"
                         logger.info(
                             f"{symbol}: trailing stop triggered (peak=${new_best:.4f} "
@@ -369,7 +378,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                         )
                 else:
                     trail_trigger = new_best * (1 + trail_raw_pct / 100)
-                    if current_price > trail_trigger and pnl_usdt >= _MIN_PROFIT_USD:
+                    if current_price > trail_trigger and raw_pnl_pct >= settings.trail_min_profit_raw_pct:
                         close_reason = "trailing_stop"
                         logger.info(
                             f"{symbol}: trailing stop triggered (peak=${new_best:.4f} "
@@ -400,16 +409,6 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                         cap_price = entry_price * (1 + max_price_loss_pct / 100)
                         safe_exit = min(current_price, stop_loss, cap_price)
                     current_price = safe_exit
-                    if paper:
-                        slip = 0.001 if mode == "FUTURES" else 0.0005
-                        current_price = current_price * (1 - slip) if side == "BUY" else current_price * (1 + slip)
-                    # Recalculate pnl with the capped exit price so DB records the correct value
-                    if side == "BUY":
-                        raw_pnl_pct = (current_price / entry_price - 1) * 100
-                    else:
-                        raw_pnl_pct = (entry_price - current_price) / entry_price * 100
-                    effective_pnl_pct = raw_pnl_pct * leverage
-                    pnl_usdt = notional * effective_pnl_pct / 100
                     close_reason = "stop_loss"
                     logger.info(f"{symbol}: SL triggered - exit capped at ${safe_exit:.4f} (effective {effective_pnl_pct:.2f}%)")
                 elif tp_hit:
@@ -421,13 +420,14 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                     if tp_trail_raw:
                         tp_anchor = float(tp_trail_raw)
                         retrace = (side == "BUY" and current_price < tp_anchor) or (side == "SELL" and current_price > tp_anchor)
-                        if retrace and pnl_usdt >= _MIN_PROFIT_USD:
+                        if retrace and raw_pnl_pct >= settings.trail_min_profit_raw_pct:
                             close_reason = "take_profit"
                             logger.info(f"{symbol}: TP follower - retraced below anchor ${tp_anchor:.4f}, closing at ${current_price:.4f}")
                             await redis.delete(tp_trail_key)
 
-        if close_reason is None:
-            # Structure invalidation exit — primary mechanism replacing the 15m timeout
+        if close_reason is None and _entry_ind.get("entry_model") != "path":
+            # Structure invalidation exit — primary mechanism replacing the 15m timeout.
+            # Skipped for path-model trades: their labels were simulated without it.
             try:
                 pkt_raw = await redis.get(f"research:packet:{symbol}")
                 if pkt_raw:
@@ -440,16 +440,27 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                             pkt_stale = (datetime.now(timezone.utc) - pkt_ts).total_seconds() / 60 > settings.research_stale_minutes
                         except Exception:
                             pass
-                    inv = pkt.get("invalidation")
-                    if not pkt_stale and inv is not None:
-                        inv = float(inv)
-                        if side == "BUY" and current_price < inv:
+                    if not pkt_stale:
+                        # Live packet's level only if it still agrees with this trade, else the level saved at entry
+                        inv = packet_invalidation(pkt, side)
+                        inv_source = "live packet"
+                        if inv is None:
+                            inv = packet_invalidation((_entry_ind.get("research") or {}), side)
+                            inv_source = "entry packet"
+                        held_min = _minutes_open(pos)
+                        if (
+                            inv is not None
+                            and held_min is not None
+                            and held_min >= settings.invalidation_min_hold_minutes
+                            and is_past_invalidation(side, current_price, inv, settings.invalidation_buffer_pct)
+                        ):
                             close_reason = "structure_invalidation"
-                            logger.info(f"{symbol}: BUY invalidation — price ${current_price:.4f} below hour_low ${inv:.4f}")
-                        elif side == "SELL" and current_price > inv:
-                            close_reason = "structure_invalidation"
-                            logger.info(f"{symbol}: SELL invalidation — price ${current_price:.4f} above hour_high ${inv:.4f}")
-                    elif pkt_stale:
+                            logger.info(
+                                f"{symbol}: {side} invalidation ({inv_source}) — price ${current_price:.4f} "
+                                f"{'below' if side == 'BUY' else 'above'} ${inv:.4f} "
+                                f"±{settings.invalidation_buffer_pct}% after {held_min:.1f}min"
+                            )
+                    else:
                         # Fallback: 1h structure flip when packet is stale
                         try:
                             struct_state_close, _ = await _load_structure_cached(redis, symbol)
@@ -466,11 +477,8 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                 logger.debug(f"{symbol}: invalidation check failed ({_inv_exc})")
 
         if close_reason is None:
-            opened_at = pos.get("opened_at")
-            if opened_at is not None:
-                if isinstance(opened_at, datetime) and opened_at.tzinfo is None:
-                    opened_at = opened_at.replace(tzinfo=timezone.utc)
-                minutes_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
+            minutes_open = _minutes_open(pos)
+            if minutes_open is not None:
                 scratch_timeout = max(45, params.get("negative_trade_timeout_minutes", 45))
                 if minutes_open >= scratch_timeout and pnl_usdt < 0 and effective_pnl_pct <= -1.0:
                     close_reason = "negative_timeout"
@@ -482,10 +490,11 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
         if close_reason:
             close_ok = True
             if paper:
+                is_stop = close_reason == "stop_loss"
                 if side == "BUY":
-                    await simulate_sell(redis, symbol, quantity, entry_price, current_price, mode, leverage)
+                    close_result = await simulate_sell(redis, symbol, quantity, entry_price, current_price, mode, leverage, stop=is_stop)
                 else:
-                    await simulate_buy_back(redis, symbol, quantity, entry_price, current_price, mode, leverage)
+                    close_result = await simulate_buy_back(redis, symbol, quantity, entry_price, current_price, mode, leverage, stop=is_stop)
             else:
                 close_result = None
                 if mode == "FUTURES":
@@ -505,8 +514,14 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             if not close_ok:
                 continue
 
-            # Per-symbol cooldown to prevent churn (re-opening immediately after close)
-            await redis.setex(f"bot:cooldown:{symbol}", _SYMBOL_COOLDOWN_SECONDS, "1")
+            exit_price = float((close_result or {}).get("fill_price") or current_price)
+            closed = compute_pnl(side, entry_price, exit_price, quantity, leverage, settings.taker_fee_rate)
+            effective_pnl_pct = closed.effective_pct
+            pnl_usdt = closed.net_usdt
+
+            # Per-symbol cooldown to prevent churn — longer after a loss
+            cooldown_min = settings.loss_cooldown_minutes if pnl_usdt < 0 else settings.win_cooldown_minutes
+            await redis.setex(f"bot:cooldown:{symbol}", int(cooldown_min * 60), "1")
 
             # Track consecutive loss streak per symbol (2h TTL — day trader memory)
             streak_key = f"bot:loss_streak:{symbol}"
@@ -519,15 +534,15 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             await redis.srem(recovery_key, str(pos_id))
             await redis.delete(f"bot:trail:{pos_id}")
 
-            # Estimate and record fee for this trade
-            estimated_fee = abs(notional * settings.taker_fee_rate)  # Binance taker fee ~0.04%
+            # Round-trip taker fee (open + close)
+            estimated_fee = closed.fee_usdt
             await risk.record_fee(estimated_fee)
 
             await close_position(
-                pos_id, symbol, current_price, pnl_usdt, effective_pnl_pct, close_reason,
+                pos_id, symbol, exit_price, pnl_usdt, effective_pnl_pct, close_reason,
                 trade_id=trade_id,
                 estimated_fee_usdt=estimated_fee,
-                gross_pnl_usdt=pnl_usdt + estimated_fee,
+                gross_pnl_usdt=closed.gross_usdt,
             )
             await ev.publish_trade_closed(redis, symbol, mode, pnl_usdt, effective_pnl_pct, close_reason, paper)
 
@@ -591,6 +606,12 @@ async def _try_open_trade(
     sell_threshold: float | None = None,
 ) -> bool:
     symbol = pair.symbol
+    # Path mode reproduces the forward-tested rule: no researcher / confidence adjustments,
+    # fixed ATR stops, paper only (FIX_PLAN_OCT14 8.2c)
+    path_mode = settings.entry_model == "path"
+    if path_mode and not (await _get_trading_mode_flags(redis))["paper"]:
+        logger.warning(f"{symbol}: entry_model=path is paper-only until Phase 6 — no live entries")
+        return False
 
     # Per-symbol cooldown check — don't reopen a recently closed symbol
     cooldown_active = await redis.get(f"bot:cooldown:{symbol}")
@@ -602,24 +623,34 @@ async def _try_open_trade(
     if not await _is_symbol_viable(redis, symbol):
         return False
 
-    # Minimum prediction gate — must predict at least 1% move to cover fees and TP distance
-    if abs(pair.predicted_change_pct) < 1.0:
+    # Volatility ceiling — stops can't be wide enough for these at our leverage
+    if pair.atr_pct > settings.max_entry_atr_pct:
+        logger.debug(f"{symbol}: skip — ATR {pair.atr_pct:.2f}% above {settings.max_entry_atr_pct}% ceiling")
+        return False
+
+    # Minimum prediction gate — must predict at least 1% move to cover fees and TP distance.
+    # The ensemble emits a fixed nominal size (it already requires a fee-beating move), so only require a direction.
+    if pair.predicted_change_pct == 0:
+        return False
+    if not settings.ensemble_enabled and abs(pair.predicted_change_pct) < 1.0:
         return False
 
     # Per-symbol learning — throttle size on poor performers, block only the worst
     try:
         from bot.research.loop import get_symbol_multiplier
         sym_mult = await get_symbol_multiplier(redis, symbol)
-        if sym_mult <= 0.50:
+        if sym_mult <= 0.50 and path_mode:
+            logger.debug(f"{symbol}: path mode — per-symbol learning would have blocked (mult={sym_mult:.2f})")
+        elif sym_mult <= 0.50:
             logger.info(f"{symbol}: blocked by per-symbol learning (mult={sym_mult:.2f})")
             return False
     except Exception:
         pass
 
-    # Day trader blacklist — skip symbols that lost 3+ consecutive trades recently
+    # Day trader blacklist — skip symbols on a recent loss streak (2h memory)
     try:
         streak_raw = await redis.get(f"bot:loss_streak:{symbol}")
-        if streak_raw and int(streak_raw) >= 3:
+        if streak_raw and int(streak_raw) >= settings.loss_streak_block:
             logger.debug(f"{symbol}: blacklisted — {streak_raw} consecutive losses")
             return False
     except Exception:
@@ -638,11 +669,11 @@ async def _try_open_trade(
 
     # Apply regime confidence multiplier
     effective_confidence = pair.confidence
-    if regime_result is not None:
+    if regime_result is not None and not path_mode:
         effective_confidence *= regime_result.confidence_multiplier
     fr_rate = pair.funding_rate if pair.funding_rate else 0.0
     fr_side = pair.funding_side_to_collect if pair.funding_side_to_collect else "NONE"
-    if fr_side != "NONE":
+    if fr_side != "NONE" and not path_mode:
         if fr_side == side:
             effective_confidence = min(1.0, effective_confidence + 0.05)
         elif abs(fr_rate) > 0.001:
@@ -650,7 +681,7 @@ async def _try_open_trade(
 
     # Day trading: SELL (SHORT) uses same confidence floor as BUY
     sell_floor = sell_threshold if sell_threshold is not None else params["confidence_threshold"]
-    if side == "SELL" and effective_confidence < sell_floor:
+    if side == "SELL" and effective_confidence < sell_floor and not path_mode:
         logger.debug(
             f"{symbol}: skip SELL — confidence {effective_confidence:.2f} < {sell_floor:.2f}"
         )
@@ -681,6 +712,14 @@ async def _try_open_trade(
             structure=struct_state,
             sentiment=market_sentiment,
         )
+        if path_mode:
+            if not decision.ok or decision.confidence_adj != 1.0 or decision.size_adj != 1.0:
+                logger.debug(
+                    f"{symbol}: path mode — gate would have: {decision.reason} "
+                    f"conf_adj={decision.confidence_adj:.2f} size_adj={decision.size_adj:.2f}"
+                )
+            decision = type(decision)(True, "path_model", packet=None, rules=decision.rules,
+                                      venue="FUTURES", side=side)
         if not decision.ok or decision.side not in ("BUY", "SELL"):
             logger.debug(f"{symbol}: gate reject — {decision.reason}")
             return False
@@ -689,11 +728,10 @@ async def _try_open_trade(
         effective_confidence *= decision.confidence_adj
         if decision.confidence_adj != 1.0:
             logger.debug(f"{symbol}: researcher conf adj {decision.confidence_adj:.2f} → effective {effective_confidence:.2f}")
-        if decision.packet:
-            try:
-                pair.research_packet = decision.packet  # type: ignore[attr-defined]
-            except Exception:
-                pass
+        try:
+            pair.research_packet = decision.packet  # type: ignore[attr-defined]
+        except Exception:
+            pass
     except Exception as gate_exc:
         logger.warning(f"{symbol}: alignment gate error ({gate_exc}) — standing down")
         return False
@@ -748,15 +786,15 @@ async def _try_open_trade(
         sym_mult = await get_symbol_multiplier(redis, symbol)
     except Exception:
         sym_mult = 1.0
-    combined_mult = max(0.3, global_mult * sym_mult)
+    combined_mult = 1.0 if path_mode else max(0.3, global_mult * sym_mult)
     if combined_mult < 1.0:
         logger.info(f"{symbol}: researcher throttle global={global_mult:.2f} sym={sym_mult:.2f} -> {combined_mult:.2f}")
     trade_heat *= combined_mult
 
-    # Unarmed researcher packet → reduce position size
+    # Researcher unarmed, missing or contradicting → reduce position size
     if decision.size_adj < 1.0:
         trade_heat *= decision.size_adj
-        logger.debug(f"{symbol}: unarmed packet size_adj={decision.size_adj:.2f}")
+        logger.debug(f"{symbol}: researcher size_adj={decision.size_adj:.2f}")
 
     can_open, reason = await risk.can_open_trade(
         symbol, open_symbols, params, capital, open_heat_usdt,
@@ -783,6 +821,14 @@ async def _try_open_trade(
     if not current_price or current_price <= 0:
         return False
 
+    entry_inv = packet_invalidation(decision.packet, side)
+    if entry_inv is not None and is_past_invalidation(side, current_price, entry_inv):
+        logger.info(
+            f"{symbol}: skip {side} — pre_entry_invalidated (price ${current_price:.4f} already "
+            f"{'below' if side == 'BUY' else 'above'} researcher level ${entry_inv:.4f})"
+        )
+        return False
+
     if struct_state and struct_state.confirmed:
         if (side == "BUY" and struct_state.trend == "DOWN") or (side == "SELL" and struct_state.trend == "UP"):
             effective_confidence *= 0.93
@@ -800,12 +846,13 @@ async def _try_open_trade(
 
     # Phase 2: Zone-based SL/TP with R:R gate
     zone_based_sl = False
-    if zones and atr_abs > 0:
+    if zones and atr_abs > 0 and not path_mode:
         stop_loss, zone_based_sl = calculate_zone_sl(
             current_price, side, zones, atr_abs,
-            fallback_sl_pct=params["stop_loss_percent"],
-            max_sl_pct=settings.zone_sl_max_pct,
+            fallback_sl_pct=stop_distance_pct(pair.atr_pct, lev),
+            max_sl_pct=min(settings.zone_sl_max_pct, max_stop_pct(lev)),
         )
+        stop_loss = clamp_stop(current_price, side, stop_loss, lev)
         take_profit = calculate_zone_tp(
             current_price, side, zones, atr_for_tp,
             fallback_tp_pct=params["take_profit_percent"],
@@ -819,6 +866,8 @@ async def _try_open_trade(
             leverage=lev,
             atr_pct=atr_for_tp,
         )
+
+    take_profit = cap_take_profit(current_price, side, stop_loss, take_profit)
 
     # TP distance gate — must be at least 1.2% from entry to clear round-trip fees
     tp_dist_pct = abs(take_profit - current_price) / current_price * 100
@@ -848,7 +897,8 @@ async def _try_open_trade(
     logger.info(
         f"Opening {'[PAPER] ' if paper else ''}{mode} {side} trade: {symbol} "
         f"@ ${current_price:.4f} | qty={quantity:.6f} | "
-        f"SL=${stop_loss:.4f} TP=${take_profit:.4f} | R:R={rr:.1f}:1 | "
+        f"SL=${stop_loss:.4f} ({abs(current_price - stop_loss) / current_price * 100:.2f}%) "
+        f"TP=${take_profit:.4f} | R:R={rr:.1f}:1 | lev={lev}x | atr={pair.atr_pct:.2f}% | "
         f"struct={'zone' if zone_based_sl else 'fixed'} | "
         f"conf={pair.confidence:.2f} pred={pair.predicted_change_pct:+.2f}%"
     )
@@ -894,11 +944,14 @@ async def _try_open_trade(
         "rr_ratio": rr,
         "structure_trend": struct_state.trend if struct_state else "UNKNOWN",
         "structure_confirmed": struct_state.confirmed if struct_state else False,
+        "entry_model": settings.entry_model,
     }
     pkt = getattr(pair, "research_packet", None)
     if isinstance(pkt, dict):
         entry_indicators["research"] = {
             "pred_side": pkt.get("pred_1h_close_side"),
+            "pred_1h_close_side": pkt.get("pred_1h_close_side"),
+            "invalidation": pkt.get("invalidation"),
             "confidence": pkt.get("confidence"),
             "arm": pkt.get("arm"),
             "hour_start": pkt.get("hour_start"),
@@ -982,30 +1035,27 @@ async def _maybe_switch_trade(
 
     if paper:
         if worst_pos.get("side", "BUY") == "BUY":
-            await simulate_sell(redis, symbol, quantity, entry_price, current_price, mode, leverage)
+            close_result = await simulate_sell(redis, symbol, quantity, entry_price, current_price, mode, leverage)
         else:
-            await simulate_buy_back(redis, symbol, quantity, entry_price, current_price, mode, leverage)
+            close_result = await simulate_buy_back(redis, symbol, quantity, entry_price, current_price, mode, leverage)
     else:
         mf = await _get_trading_mode_flags(redis)
         if mode == "FUTURES":
-            await place_futures_market_close(symbol, quantity, use_testnet=mf["use_testnet"])
+            close_result = await place_futures_market_close(symbol, quantity, use_testnet=mf["use_testnet"])
         else:
-            await place_spot_market_sell(symbol, quantity, use_testnet=mf["use_testnet"])
+            close_result = await place_spot_market_sell(symbol, quantity, use_testnet=mf["use_testnet"])
 
     side = worst_pos.get("side", "BUY")
-    if side == "BUY":
-        raw_pnl_pct = (current_price / entry_price - 1) * 100
-    else:
-        raw_pnl_pct = (entry_price - current_price) / entry_price * 100
-    effective_pnl_pct = raw_pnl_pct * leverage
-    notional = quantity * entry_price
-    pnl_usdt = notional * effective_pnl_pct / 100
-    estimated_fee = abs(notional * settings.taker_fee_rate)
+    exit_price = float((close_result or {}).get("fill_price") or current_price)
+    closed = compute_pnl(side, entry_price, exit_price, quantity, leverage, settings.taker_fee_rate)
+    effective_pnl_pct = closed.effective_pct
+    pnl_usdt = closed.net_usdt
+    estimated_fee = closed.fee_usdt
     await risk.record_fee(estimated_fee)
 
     await close_position(
-        pos_id, symbol, current_price, pnl_usdt, effective_pnl_pct, "trade_switch",
-        trade_id=trade_id, estimated_fee_usdt=estimated_fee, gross_pnl_usdt=pnl_usdt + estimated_fee,
+        pos_id, symbol, exit_price, pnl_usdt, effective_pnl_pct, "trade_switch",
+        trade_id=trade_id, estimated_fee_usdt=estimated_fee, gross_pnl_usdt=closed.gross_usdt,
     )
     kill_triggered = await risk.on_trade_closed(
         effective_pnl_pct, params["daily_loss_limit_percent"],
@@ -1268,6 +1318,18 @@ async def run_trading_engine(
                 max_concurrent=max(params["max_concurrent_trades"] * 5, 20),
                 correlation_matrix=correlation_matrix or None,
             )
+
+            # A short-horizon prediction is only worth acting on early in its window.
+            as_of = ranked_store.get("as_of")
+            pred_age_min = (datetime.now(timezone.utc) - as_of).total_seconds() / 60 if as_of else None
+            if pred_age_min is None or pred_age_min > settings.max_prediction_age_minutes:
+                if ranked_filtered and ranked_store.get("_age_logged") != as_of:
+                    logger.info(
+                        f"Predictions are {pred_age_min or 0:.0f} min old "
+                        f"(max {settings.max_prediction_age_minutes}) — no new entries until next refresh"
+                    )
+                    ranked_store["_age_logged"] = as_of
+                ranked_filtered = []
 
             _tried = 0
             for pair in ranked_filtered:

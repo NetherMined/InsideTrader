@@ -50,8 +50,19 @@ async def init_db() -> None:
                 ADD COLUMN IF NOT EXISTS gross_pnl_usdt FLOAT,
                 ADD COLUMN IF NOT EXISTS funding_rate FLOAT DEFAULT 0.0,
                 ADD COLUMN IF NOT EXISTS regime VARCHAR(20) DEFAULT 'UNKNOWN',
-                ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE;
+                ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS pnl_usdt_true FLOAT,
+                ADD COLUMN IF NOT EXISTS fee_usdt_true FLOAT;
         """))
+        # Backfill corrected P&L for trades closed before the leverage double-count fix.
+        # quantity * price already includes leverage, so P&L is quantity * price change minus round-trip fees.
+        await conn.execute(text("""
+            UPDATE trades
+            SET fee_usdt_true = quantity * (entry_price + exit_price) * :fee_rate,
+                pnl_usdt_true = quantity * (exit_price - entry_price) * CASE WHEN side = 'BUY' THEN 1 ELSE -1 END
+                                - quantity * (entry_price + exit_price) * :fee_rate
+            WHERE status = 'CLOSED' AND exit_price IS NOT NULL AND pnl_usdt_true IS NULL
+        """), {"fee_rate": settings.taker_fee_rate})
     logger.info("Database schema migration applied")
 
     # Create performance indexes (idempotent — one statement per execute for asyncpg compatibility)

@@ -58,6 +58,9 @@ class Trade(Base):
     pnl_percent = Column(Float)
     estimated_fee_usdt = Column(Float, default=0.0)
     gross_pnl_usdt = Column(Float)
+    # Corrected values: pnl_usdt on trades closed before Oct 14 2026 counted leverage twice
+    pnl_usdt_true = Column(Float)
+    fee_usdt_true = Column(Float)
     funding_rate = Column(Float, default=0.0)
     regime = Column(String(20), default="UNKNOWN")  # TRENDING, RANGING, TRANSITION
     status = Column(String(15), default="OPEN")
@@ -186,3 +189,25 @@ class RulePatch(Base):
     decided_at = Column(DateTime(timezone=True))
     decided_by = Column(String(16))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class DerivsBar(Base):
+    """Binance futures derivatives / order-flow series per 15m bar (Phase 8.2a).
+
+    open_time is the endpoint timestamp: the start of the 15m period for the taker and
+    long/short ratios and the kline fields, the snapshot time for open interest. Values are
+    stored raw; feature builders lag them so only data public before a decision is used.
+    """
+    __tablename__ = "derivs_15m"
+    __table_args__ = (UniqueConstraint("symbol", "open_time", name="uq_derivs_15m"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(30), nullable=False, index=True)
+    open_time = Column(DateTime(timezone=True), nullable=False, index=True)
+    oi_value = Column(Float)          # sumOpenInterestValue (USDT)
+    taker_ratio = Column(Float)       # taker buy / sell volume
+    gl_ratio = Column(Float)          # global long/short account ratio
+    top_pos_ratio = Column(Float)     # top traders long/short position ratio
+    taker_buy_quote = Column(Float)   # kline taker buy quote volume
+    quote_volume = Column(Float)      # kline quote volume
+    funding = Column(Float)           # last settled funding rate as of the bar

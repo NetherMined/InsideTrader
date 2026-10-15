@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import { useCurrency } from '@/lib/currency';
 import type { Health, TradeLimits, AccountBalances, LiveMode } from '@/lib/types';
 import { NotificationPermissionButton, NotificationFilterSelector } from '@/components/Toast';
+import { ResetCapitalModal } from '@/components/ResetCapitalModal';
 
 function StatusDot({ ok }: { ok: boolean }) {
   return (
@@ -142,7 +143,7 @@ const DEFAULT_LIMITS: TradeLimits = {
 };
 
 export default function SettingsPage() {
-  const { display, tooltip, zarRate, currency } = useCurrency();
+  const { display, tooltip } = useCurrency();
   const [health, setHealth] = useState<Health | null>(null);
   const [limits, setLimits] = useState<TradeLimits>(DEFAULT_LIMITS);
   const [loading, setLoading] = useState(true);
@@ -150,9 +151,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
 
   const [capital, setCapital] = useState<number | null>(null);
-  const [capitalInput, setCapitalInput] = useState('');
-  const [savingCapital, setSavingCapital] = useState(false);
-  const [showRestartModal, setShowRestartModal] = useState(false);
+  const [showResetCapitalModal, setShowResetCapitalModal] = useState(false);
   const [showHardResetModal, setShowHardResetModal] = useState(false);
   const [hardResetting, setHardResetting] = useState(false);
   const [hardResetMsg, setHardResetMsg] = useState('');
@@ -191,7 +190,6 @@ export default function SettingsPage() {
       if (tl) setLimits(tl);
       if (c) {
         setCapital(c.capital_usdt);
-        setCapitalInput(c.capital_usdt.toFixed(2));
       }
       if (bs) setKillSwitchActive(bs.kill_switch);
       if (lm) setLiveMode(lm);
@@ -223,26 +221,6 @@ export default function SettingsPage() {
       showToast('Failed to save settings');
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function handleRestartCapital() {
-    const raw = parseFloat(capitalInput.replace(',', '.'));
-    if (isNaN(raw) || raw <= 0) {
-      showToast('Enter a valid capital amount');
-      return;
-    }
-    const amount = currency === 'ZAR' && zarRate ? raw / zarRate : raw;
-    setSavingCapital(true);
-    setShowRestartModal(false);
-    try {
-      await api.setCapital(amount);
-      setCapital(amount);
-      showToast(`Bot restarting with ${display(amount)} capital`);
-    } catch {
-      showToast('Failed to restart bot');
-    } finally {
-      setSavingCapital(false);
     }
   }
 
@@ -325,7 +303,6 @@ export default function SettingsPage() {
     }
   }
 
-  const capitalChanged = capital !== null && parseFloat(capitalInput || '0') !== capital;
   const isLive = liveMode ? !liveMode.paper_trading_mode && liveMode.live_trading_enabled : false;
 
   return (
@@ -536,44 +513,15 @@ export default function SettingsPage() {
         <div className="rounded-xl p-4" style={{ background: '#111111', border: '1px solid #1f1f1f' }}>
           <div className="text-sm font-semibold mb-1">Paper Capital</div>
           <p className="text-xs mb-4" style={{ color: '#848e9c' }}>
-            Set the starting USDT balance for paper trading. Restarting closes all open positions.
+            Set the starting USDT balance for paper trading. Requires no open positions.
           </p>
-          <div className="flex items-center gap-3 mb-3">
-            <div className="flex items-center gap-1.5 flex-1">
-              <span className="text-xs font-medium" style={{ color: '#848e9c' }}>$</span>
-              <input
-                type="number"
-                min="0"
-                step="10"
-                placeholder="1000"
-                value={capitalInput}
-                onChange={(e) => setCapitalInput(e.target.value)}
-                onBlur={() => {
-                  const raw = parseFloat(capitalInput.replace(',', '.'));
-                  if (!isNaN(raw) && raw > 0 && capital !== null && raw !== capital) {
-                    setSavingCapital(true);
-                    api.setCapital(raw).then(() => {
-                      setCapital(raw);
-                      showToast(`Capital updated to ${raw.toFixed(2)} USDT`);
-                    }).catch(() => {
-                      showToast('Failed to update capital');
-                      setCapitalInput(capital.toFixed(2));
-                    }).finally(() => setSavingCapital(false));
-                  }
-                }}
-                className="flex-1 text-xs px-3 py-2 rounded-lg"
-                style={{
-                  background: '#0d0d0d',
-                  border: `1px solid ${savingCapital ? 'rgba(240,185,11,0.4)' : '#2a2a2a'}`,
-                  color: '#eaecef',
-                  outline: 'none',
-                }}
-              />
-            </div>
-            {savingCapital && (
-              <span className="text-xs" style={{ color: '#f0b90b' }}>Saving...</span>
-            )}
-          </div>
+          <button
+            onClick={() => setShowResetCapitalModal(true)}
+            className="w-full mb-3 px-3 py-2 rounded-lg text-xs font-semibold"
+            style={{ background: 'rgba(240,185,11,0.12)', color: '#f0b90b', border: '1px solid rgba(240,185,11,0.3)' }}
+          >
+            Reset Paper Capital
+          </button>
           {capital !== null && (
             <div className="text-xs px-3 py-2 rounded-lg" style={{ background: 'rgba(14,203,129,0.06)', color: '#848e9c' }}>
               Current capital: {display(capital)}
@@ -752,39 +700,16 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {showRestartModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center"
-          style={{ background: 'rgba(0,0,0,0.7)' }}
-          onClick={() => setShowRestartModal(false)}
-        >
-          <div
-            className="rounded-xl p-6 max-w-sm w-full mx-4"
-            style={{ background: '#111111', border: '1px solid #1f1f1f' }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="text-sm font-semibold mb-2">Restart Bot?</div>
-            <p className="text-xs mb-4" style={{ color: '#848e9c' }}>
-              Reset paper capital to {display(parseFloat(capitalInput || '0'))} and restart the bot? All open positions will be closed.
-            </p>
-            <div className="flex items-center gap-3 justify-end">
-              <button
-                onClick={() => setShowRestartModal(false)}
-                className="px-3 py-2 rounded-lg text-xs font-medium"
-                style={{ background: '#1a1a1a', color: '#848e9c', border: '1px solid #2a2a2a' }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleRestartCapital}
-                className="px-3 py-2 rounded-lg text-xs font-medium"
-                style={{ background: 'rgba(246,70,93,0.15)', color: '#f6465d', border: '1px solid rgba(246,70,93,0.3)' }}
-              >
-                Restart
-              </button>
-            </div>
-          </div>
-        </div>
+      {showResetCapitalModal && (
+        <ResetCapitalModal
+          currentCapital={capital}
+          onClose={() => setShowResetCapitalModal(false)}
+          onReset={(amount) => {
+            setCapital(amount);
+            setShowResetCapitalModal(false);
+            showToast(`Capital reset to ${amount.toFixed(2)} USDT — confirm startup on the Dashboard`);
+          }}
+        />
       )}
     </div>
   );

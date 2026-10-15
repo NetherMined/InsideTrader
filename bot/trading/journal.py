@@ -133,6 +133,8 @@ async def close_position(
                             pnl_percent = :pnl_pct,
                             estimated_fee_usdt = :estimated_fee,
                             gross_pnl_usdt = :gross_pnl,
+                            pnl_usdt_true = :pnl_usdt,
+                            fee_usdt_true = :estimated_fee,
                             status = 'CLOSED',
                             closed_at = :closed_at,
                             extra = COALESCE(extra, '{}'::jsonb) || CAST(:close_extra AS jsonb)
@@ -153,6 +155,10 @@ async def close_position(
                         SET exit_price = :exit_price,
                             pnl_usdt = :pnl_usdt,
                             pnl_percent = :pnl_pct,
+                            estimated_fee_usdt = :estimated_fee,
+                            gross_pnl_usdt = :gross_pnl,
+                            pnl_usdt_true = :pnl_usdt,
+                            fee_usdt_true = :estimated_fee,
                             status = 'CLOSED',
                             closed_at = :closed_at,
                             extra = COALESCE(extra, '{}'::jsonb) || CAST(:close_extra AS jsonb)
@@ -165,6 +171,7 @@ async def close_position(
                     """),
                     {
                         "exit_price": exit_price, "pnl_usdt": pnl_usdt, "pnl_pct": pnl_pct,
+                        "estimated_fee": estimated_fee_usdt, "gross_pnl": gross_pnl_usdt,
                         "closed_at": now, "symbol": symbol,
                         "close_extra": json.dumps({"close_reason": close_reason}),
                     },
@@ -206,12 +213,14 @@ async def get_open_positions() -> list[dict]:
     async with async_session() as session:
         result = await session.execute(
             text("""
-                SELECT id, symbol, side, mode, entry_price, current_price,
-                       quantity, leverage, stop_loss_price, take_profit_price,
-                       unrealized_pnl, paper_trade, trade_id,
-                       opened_at AT TIME ZONE 'UTC' AS opened_at
-                FROM positions
-                ORDER BY opened_at DESC
+                SELECT p.id, p.symbol, p.side, p.mode, p.entry_price, p.current_price,
+                       p.quantity, p.leverage, p.stop_loss_price, p.take_profit_price,
+                       p.unrealized_pnl, p.paper_trade, p.trade_id,
+                       p.opened_at AT TIME ZONE 'UTC' AS opened_at,
+                       t.extra->'entry_indicators' AS entry_indicators
+                FROM positions p
+                LEFT JOIN trades t ON t.id = p.trade_id
+                ORDER BY p.opened_at DESC
             """)
         )
         return [dict(r) for r in result.mappings().all()]

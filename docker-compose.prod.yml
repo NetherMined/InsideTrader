@@ -51,6 +51,7 @@ services:
     volumes:
       - ml_models:/app/bot/analysis/models
       - bot_logs:/app/logs
+      - ./baseline:/app/baseline
     deploy:
       resources:
         limits:

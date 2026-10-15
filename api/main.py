@@ -721,13 +721,23 @@ async def get_capital():
 
 
 @app.post("/api/v1/settings/capital", response_model=CapitalResponse)
-async def set_capital(request: SetCapitalRequest):
+async def set_capital(
+    request: SetCapitalRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
     if request.capital_usdt <= 0:
         raise HTTPException(status_code=400, detail="Capital must be greater than 0")
+    open_count = (await session.execute(text("SELECT COUNT(*) FROM positions"))).scalar() or 0
+    if open_count:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Close all {open_count} open position(s) before resetting capital",
+        )
     redis = await get_redis()
     try:
         await redis.set(_PAPER_CAPITAL_KEY, str(request.capital_usdt))
         await redis.set("paper:starting_capital_usdt", str(request.capital_usdt))
+        await redis.set("paper:capital_reset_at", datetime.now(timezone.utc).isoformat())
         await redis.set("bot:kill_switch", "0")
         await redis.set("bot:defensive_mode", "0")
         await redis.set("bot:daily_pnl", "0.0")

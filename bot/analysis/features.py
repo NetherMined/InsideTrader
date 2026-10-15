@@ -86,12 +86,16 @@ _30D_PERIODS = 30 * 24  # 720 hourly candles
 _1Y_PERIODS = 365 * 24  # 8760 hourly candles
 
 
-def _add_structure_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Append structure-derived features. Zero-filled if data is insufficient."""
+def _add_structure_features(df: pd.DataFrame, tail: int | None = None) -> pd.DataFrame:
+    """Append structure features using only bars up to each row.
+
+    A single classification of the full frame would leak today's trend into
+    every historical row. Structure is computed on a trailing window at a
+    stride, then forward-filled. tail limits the work to the last rows, on the
+    same stride grid, for prediction passes that only read the newest row.
+    """
     try:
-        from bot.analysis.structure import (
-            classify_structure, detect_zones, compute_rr_ratio,
-        )
+        from bot.analysis.structure import classify_structure, detect_zones
     except ImportError:
         for col in ("structure_trend", "structure_confirmed", "distance_to_demand_pct",
                      "distance_to_supply_pct", "zone_rr_potential", "swings_since_bos",
@@ -99,58 +103,69 @@ def _add_structure_features(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = 0.0
         return df
 
-    trend_map = {"UP": 1.0, "DOWN": -1.0, "RANGE": 0.0}
-    defaults = {
-        "structure_trend": 0.0, "structure_confirmed": 0.0,
-        "distance_to_demand_pct": 0.0, "distance_to_supply_pct": 0.0,
-        "zone_rr_potential": 0.0, "swings_since_bos": 0.0, "zone_touch_count": 0.0,
-    }
     n = len(df)
-    if n < 60:
-        for col, val in defaults.items():
-            df[col] = val
-        return df
-
-    try:
-        state = classify_structure(df, lookback=3)
-        zones = detect_zones(df, state)
-    except Exception:
-        for col, val in defaults.items():
-            df[col] = val
-        return df
-
-    sv = trend_map.get(state.trend, 0.0)
-    sc = 1.0 if state.confirmed else 0.0
-    sb = float(state.swings_since_bos)
-    df["structure_trend"] = sv
-    df["structure_confirmed"] = sc
-    df["swings_since_bos"] = sb
-
-    closes = df["close"].values
+    trend = np.zeros(n)
+    confirmed = np.zeros(n)
+    swings = np.zeros(n)
     d_demand = np.zeros(n)
     d_supply = np.zeros(n)
     rr_pot = np.zeros(n)
     z_touch = np.zeros(n)
+    trend_map = {"UP": 1.0, "DOWN": -1.0, "RANGE": 0.0}
 
-    demand_zones = [z for z in zones if z.type == "DEMAND" and not z.invalidated]
-    supply_zones = [z for z in zones if z.type == "SUPPLY" and not z.invalidated]
+    if n < 60:
+        df["structure_trend"] = trend
+        df["structure_confirmed"] = confirmed
+        df["swings_since_bos"] = swings
+        df["distance_to_demand_pct"] = d_demand
+        df["distance_to_supply_pct"] = d_supply
+        df["zone_rr_potential"] = rr_pot
+        df["zone_touch_count"] = z_touch
+        return df
 
-    for i in range(n):
-        c = float(closes[i])
-        if c <= 0:
+    window, step = 80, 6
+    first_end = 59
+    if tail is not None and n - tail > first_end:
+        first_end += -(-(n - tail - first_end) // step) * step
+    last = 0 if first_end == 59 else first_end - step + 1
+    for end in range(first_end, n, step):
+        start = max(0, end + 1 - window)
+        view = df.iloc[start:end + 1]
+        try:
+            state = classify_structure(view, lookback=3)
+            zones = detect_zones(view, state)
+        except Exception:
             continue
-        if demand_zones:
-            nearest_d = min(demand_zones, key=lambda z: abs(c - z.top))
-            d_demand[i] = (c - nearest_d.top) / c * 100
-            z_touch[i] = float(nearest_d.touches)
-        if supply_zones:
-            nearest_s = min(supply_zones, key=lambda z: abs(z.bottom - c))
-            d_supply[i] = (nearest_s.bottom - c) / c * 100
-        if demand_zones and supply_zones:
-            sl = min(demand_zones, key=lambda z: abs(c - z.top)).bottom
-            tp = min(supply_zones, key=lambda z: abs(z.bottom - c)).bottom
-            rr_pot[i] = compute_rr_ratio(c, sl, tp)
+        close = float(view["close"].iloc[-1])
+        demand = [z for z in zones if z.type == "DEMAND" and not z.invalidated]
+        supply = [z for z in zones if z.type == "SUPPLY" and not z.invalidated]
+        demand_dist = supply_dist = rr = touches = 0.0
+        if close > 0 and demand:
+            nearest_d = min(demand, key=lambda z: abs(close - z.top))
+            demand_dist = (close - nearest_d.top) / close * 100
+            touches = float(nearest_d.touches)
+        if close > 0 and supply:
+            nearest_s = min(supply, key=lambda z: abs(z.bottom - close))
+            supply_dist = (nearest_s.bottom - close) / close * 100
+        if close > 0 and demand and supply:
+            sl = min(demand, key=lambda z: abs(close - z.top)).bottom
+            tp = min(supply, key=lambda z: abs(z.bottom - close)).bottom
+            risk = abs(close - sl)
+            reward = abs(tp - close)
+            rr = reward / risk if risk > 0 else 0.0
+        stop = min(n, end + 1 + step)
+        trend[last:stop] = trend_map.get(state.trend, 0.0)
+        confirmed[last:stop] = 1.0 if state.confirmed else 0.0
+        swings[last:stop] = float(state.swings_since_bos)
+        d_demand[last:stop] = demand_dist
+        d_supply[last:stop] = supply_dist
+        rr_pot[last:stop] = rr
+        z_touch[last:stop] = touches
+        last = stop
 
+    df["structure_trend"] = trend
+    df["structure_confirmed"] = confirmed
+    df["swings_since_bos"] = swings
     df["distance_to_demand_pct"] = d_demand
     df["distance_to_supply_pct"] = d_supply
     df["zone_rr_potential"] = rr_pot
@@ -158,7 +173,7 @@ def _add_structure_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def engineer_features(df: pd.DataFrame, target_pct: float = 1.0) -> pd.DataFrame:
+def engineer_features(df: pd.DataFrame, target_pct: float = 1.0, structure_tail: int | None = None) -> pd.DataFrame:
     df = df.copy()
 
     df["atr_pct"] = (df["atr"] / df["close"] * 100).replace([np.inf, -np.inf], np.nan)
@@ -255,7 +270,7 @@ def engineer_features(df: pd.DataFrame, target_pct: float = 1.0) -> pd.DataFrame
     df["rsi_oversold"] = (df["rsi"] < 35).astype(float)
     df["rsi_overbought"] = (df["rsi"] > 70).astype(float)
 
-    df = _add_structure_features(df)
+    df = _add_structure_features(df, tail=structure_tail)
 
     # Forward return targets
     df["fwd_ret"] = df["close"].pct_change(FORWARD_HOURS).shift(-FORWARD_HOURS) * 100
@@ -272,13 +287,22 @@ def engineer_features(df: pd.DataFrame, target_pct: float = 1.0) -> pd.DataFrame
     return df
 
 
+def fee_direction_label(df: pd.DataFrame) -> pd.Series:
+    """3-class short-horizon label: +1 up beyond fees, -1 down beyond fees, 0 flat. NaN when unknown."""
+    label = pd.Series(0.0, index=df.index)
+    label[df["fwd_fee_up"] == 1] = 1.0
+    label[df["fwd_fee_down"] == 1] = -1.0
+    label[df["fwd_short"].isna()] = np.nan
+    return label
+
+
 def get_X(df: pd.DataFrame) -> pd.DataFrame:
     available = [c for c in FEATURE_COLS if c in df.columns]
     return df[available]
 
 
 def get_X_y(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
-    feat_df = engineer_features(df)
+    feat_df = df if "fwd_ret" in df.columns else engineer_features(df)
     cols = [c for c in FEATURE_COLS if c in feat_df.columns] + ["fwd_ret", "fwd_up"]
     clean = feat_df[cols].dropna()
     X = clean[[c for c in FEATURE_COLS if c in clean.columns]]

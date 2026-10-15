@@ -29,7 +29,10 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
     cache: 'no-store',
   });
-  if (!res.ok) throw new Error(`${res.status} ${path}`);
+  if (!res.ok) {
+    const detail = await res.json().then((b) => b?.detail).catch(() => null);
+    throw new Error(typeof detail === 'string' ? detail : `${res.status} ${path}`);
+  }
   return res.json();
 }
 

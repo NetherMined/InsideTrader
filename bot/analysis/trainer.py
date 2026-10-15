@@ -24,7 +24,7 @@ from sqlalchemy import text
 from bot.config import settings
 from bot.db.connection import async_session
 from bot.analysis.indicators import add_indicators, MIN_ROWS
-from bot.analysis.features import engineer_features, get_X, get_X_y
+from bot.analysis.features import engineer_features, fee_direction_label, get_X, get_X_y
 from bot.analysis.model import PricePredictor
 from bot.analysis.ensemble import EnsemblePredictor
 from bot.analysis.mode_classifier import classify_mode, mode_reason
@@ -55,7 +55,17 @@ async def _load_candles(symbol: str, timeframe: str) -> pd.DataFrame:
     df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
-    return df
+    return closed_candles(df, timeframe)
+
+
+def closed_candles(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Drop the candle that is still forming. The model trains on closed
+    candles only, so a half-built one would feed it features it never saw."""
+    if df.empty:
+        return df
+    span = pd.Timedelta(timeframe.replace("m", "min")) if timeframe.endswith("m") else pd.Timedelta(timeframe)
+    cutoff = pd.Timestamp.now(tz="UTC") - span
+    return df[df["open_time"] <= cutoff].reset_index(drop=True)
 
 
 async def _save_prediction(symbol: str, current_price: float, target_price: float,
@@ -85,9 +95,11 @@ async def _save_prediction(symbol: str, current_price: float, target_price: floa
         await session.commit()
 
 
-def _prepare_features(df_raw: pd.DataFrame, target_pct: float) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+def _prepare_features(
+    df_raw: pd.DataFrame, target_pct: float, structure_tail: int | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     df = add_indicators(df_raw)
-    feat_df = engineer_features(df, target_pct=target_pct)
+    feat_df = engineer_features(df, target_pct=target_pct, structure_tail=structure_tail)
     X, y_reg, y_cls = get_X_y(feat_df)
     return df, feat_df, X, y_reg, y_cls
 
@@ -105,12 +117,6 @@ async def _analyse_symbol(symbol: str) -> dict | None:
 
     _timeframe_target = {"5m": 0.1, "15m": 0.25, "30m": 0.5, "1h": 1.0, "4h": 4.0}
     _target_pct = _timeframe_target.get(settings.analysis_timeframe, settings.daily_target_percent / 2)
-    df, feat_df, X, y_reg, y_cls = await asyncio.to_thread(
-        _prepare_features, df_raw, _target_pct
-    )
-    if len(X) < 100:
-        logger.debug(f"{symbol}: not enough clean rows ({len(X)}), skipping")
-        return None
 
     predictor = PricePredictor(symbol)
     loaded = predictor.load()
@@ -119,6 +125,19 @@ async def _analyse_symbol(symbol: str) -> dict | None:
     if loaded and predictor.is_stale():
         logger.info(f"{symbol}: model is stale (>24h), retraining with latest data")
         loaded = False
+
+    ens = EnsemblePredictor(symbol)
+    ens_train = not ens.load() or ens.is_stale()
+    use_15m = not df_15m.empty and len(df_15m) >= 100
+
+    # A prediction-only pass reads just the newest row, so skip structure work on old history.
+    tail_1h = None if not loaded or (ens_train and not use_15m) else 200
+    df, feat_df, X, y_reg, y_cls = await asyncio.to_thread(
+        _prepare_features, df_raw, _target_pct, tail_1h
+    )
+    if len(X) < 100:
+        logger.debug(f"{symbol}: not enough clean rows ({len(X)}), skipping")
+        return None
 
     if not loaded:
         split = int(len(X) * 0.8)
@@ -151,40 +170,59 @@ async def _analyse_symbol(symbol: str) -> dict | None:
         logger.debug(f"{symbol}: latest feature row has NaN values, skipping prediction")
         return None
 
-    # Ensemble voting on true 15-minute fee-threshold move
-    ens = EnsemblePredictor(symbol)
-    ens_loaded = ens.load()
-    X_ens, y_fee, regime_y = X, y_cls, None
-    X_latest_ens = X_latest
-    if not df_15m.empty and len(df_15m) >= 100:
-        try:
-            df15 = add_indicators(df_15m)
-            feat15 = engineer_features(df15, target_pct=settings.ensemble_fee_threshold_pct)
-            X15, _, y15 = get_X_y(feat15)
-            if len(X15) >= 100 and "fwd_fee_up" in feat15.columns:
-                X_ens = X15
-                y_fee = feat15.loc[X15.index, "fwd_fee_up"].fillna(0).astype(int)
-                regime_y = (feat15.loc[X15.index, "adx"] > 25).astype(int) if "adx" in feat15.columns else None
-                X_latest_ens = get_X(feat15.dropna(subset=["rsi", "adx", "atr"])).tail(1)
-                logger.debug(f"{symbol}: ensemble using 15m candles ({len(X15)} rows)")
-        except Exception as exc:
-            logger.debug(f"{symbol}: 15m ensemble prep failed ({exc}), falling back to primary TF")
-    if not ens_loaded or ens.is_stale():
-        await asyncio.to_thread(ens.train, X_ens, y_fee, regime_y)
-        ens.save()
-    ens_result = await asyncio.to_thread(ens.predict, X_latest_ens)
-    predicted_change_pct = float(ens_result.get("direction", 0)) * 0.5  # sign * nominal size
-    confidence = float(ens_result.get("confidence", 0.0))
-    if ens_result.get("momentum_score", 0) > 0.6:
-        confidence = min(0.92, confidence * 1.05)
-    logger.info(
-        f"{symbol}: ensemble votes={ens_result.get('votes')} "
-        f"dir={ens_result.get('direction')} conf={confidence:.2f} "
-        f"momentum={ens_result.get('momentum_score', 0):.2f} regime={ens_result.get('regime')}"
-    )
+    path_sig = None
+    if settings.entry_model == "path":
+        # Path model v2 decides entries; the ensemble isn't trained or consulted
+        from bot.analysis.path_model import latest_signal, to_prediction
+        path_sig = await latest_signal(symbol)
+        predicted_change_pct, confidence = to_prediction(path_sig)
+        if path_sig:
+            logger.info(
+                f"{symbol}: path score={path_sig['score']:.3f} side={path_sig['side']} "
+                f"threshold={path_sig['threshold']:.3f} -> "
+                f"{'ENTRY' if predicted_change_pct else 'no entry'}"
+            )
+    else:
+        # Ensemble voting on true 15-minute fee-threshold move
+        y_dir = fee_direction_label(feat_df).loc[X.index].dropna()
+        X_ens, y_fee, regime_y = X.loc[y_dir.index], y_dir.astype(int), None
+        X_latest_ens = X_latest
+        if use_15m:
+            try:
+                df15 = add_indicators(df_15m)
+                feat15 = engineer_features(
+                    df15, target_pct=settings.ensemble_fee_threshold_pct,
+                    structure_tail=None if ens_train else 200,
+                )
+                X15, _, y15 = get_X_y(feat15)
+                y15_dir = fee_direction_label(feat15).loc[X15.index].dropna()
+                X15 = X15.loc[y15_dir.index]
+                if len(X15) >= 100:
+                    X_ens = X15
+                    y_fee = y15_dir.astype(int)
+                    regime_y = (feat15.loc[X15.index, "adx"] > 25).astype(int) if "adx" in feat15.columns else None
+                    X_latest_ens = get_X(feat15.dropna(subset=["rsi", "adx", "atr"])).tail(1)
+                    logger.debug(f"{symbol}: ensemble using 15m candles ({len(X15)} rows)")
+            except Exception as exc:
+                logger.debug(f"{symbol}: 15m ensemble prep failed ({exc}), falling back to primary TF")
+        if ens_train:
+            await asyncio.to_thread(ens.train, X_ens, y_fee, regime_y)
+            ens.save()
+        ens_result = await asyncio.to_thread(ens.predict, X_latest_ens)
+        predicted_change_pct = float(ens_result.get("direction", 0)) * 0.5  # sign * nominal size
+        confidence = float(ens_result.get("confidence", 0.0))
+        if ens_result.get("momentum_score", 0) > 0.6:
+            confidence = min(0.92, confidence * 1.05)
+        logger.info(
+            f"{symbol}: ensemble votes={ens_result.get('votes')} "
+            f"dir={ens_result.get('direction')} conf={confidence:.2f} "
+            f"momentum={ens_result.get('momentum_score', 0):.2f} regime={ens_result.get('regime')}"
+        )
 
     latest = feat_df.dropna(subset=["atr", "adx"]).iloc[-1]
     atr_pct = float(latest.get("atr_pct", 0.0)) if "atr_pct" in latest else 0.0
+    if path_sig:
+        atr_pct = path_sig["atr_pct"]   # 15m ATR: the stop distance the path labels were simulated with
     adx = float(latest.get("adx", 0.0)) if "adx" in latest else 0.0
     current_price = float(df_raw["close"].iloc[-1])
     target_price = current_price * (1 + predicted_change_pct / 100)
@@ -212,7 +250,17 @@ async def _analyse_symbol(symbol: str) -> dict | None:
         "day_of_week": int(latest["day_of_week"]) if "day_of_week" in latest else None,
         "day_of_month": int(latest["day_of_month"]) if "day_of_month" in latest else None,
         "month_of_year": int(latest["month_of_year"]) if "month_of_year" in latest else None,
+        "entry_model": settings.entry_model,
     }
+    if path_sig:
+        features_snapshot.update({
+            "atr_pct": round(path_sig["atr_pct"], 4),
+            "path_score": round(path_sig["score"], 4),
+            "p_buy": round(path_sig["p_buy"], 4),
+            "p_sell": round(path_sig["p_sell"], 4),
+            "path_threshold": round(path_sig["threshold"], 4),
+            "path_bar_time": path_sig["bar_time"],
+        })
 
     await _save_prediction(
         symbol, current_price, target_price,
@@ -268,6 +316,8 @@ async def run_analysis(symbols: list[str]) -> list[RankedPair]:
     predictions = [r for r in results if r is not None]
 
     for pred in predictions:
+        if settings.entry_model == "path":
+            break   # path model scores are used as-is (FIX_PLAN_OCT14 8.2c)
         sym = pred["symbol"]
         conf = pred["confidence"]
 
@@ -307,7 +357,7 @@ async def run_analysis(symbols: list[str]) -> list[RankedPair]:
 async def force_retrain_models(symbols: list[str]) -> None:
     """Force retrain all symbol models with latest data."""
     from bot.analysis.model import PricePredictor
-from bot.analysis.ensemble import EnsemblePredictor
+    from bot.analysis.ensemble import EnsemblePredictor
     from bot.analysis.features import engineer_features, get_X, get_X_y
     from bot.analysis.indicators import add_indicators
     from bot.db.connection import async_session
@@ -336,6 +386,7 @@ from bot.analysis.ensemble import EnsemblePredictor
             df_raw["open_time"] = pd.to_datetime(df_raw["open_time"], utc=True)
             for col in ["open", "high", "low", "close", "volume"]:
                 df_raw[col] = df_raw[col].astype(float)
+            df_raw = closed_candles(df_raw, settings.analysis_timeframe)
 
             df = add_indicators(df_raw)
             _tf_target = {"5m": 0.1, "15m": 0.25, "30m": 0.5, "1h": 1.0, "4h": 4.0}

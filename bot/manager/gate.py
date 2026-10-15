@@ -1,12 +1,13 @@
 """Manager entry gate — trend alignment + researcher agreement filter.
 
-Futures only. Side comes from the manager (1h ML + market structure).
-The researcher packet is required for entry:
-  - missing or stale → skip
+Futures only. Side comes from the manager's ensemble prediction and is never flipped.
+  - 1h trend (structure / EMA) against the prediction → skip
+  - 1h trend with the prediction → confidence ×1.15
+The researcher packet only scales the trade:
   - agrees + armed   → confidence ×1.10, full size
   - agrees + unarmed → confidence ×0.90, size ×0.70
-  - contradicts      → skip (never flip side)
-Override is disabled until the per-setup scorecard shows positive edge.
+  - missing or stale → size ×0.70
+  - contradicts      → size ×0.50
 """
 
 from __future__ import annotations
@@ -93,26 +94,6 @@ def compute_market_trend(
     return base_trend
 
 
-def get_aligned_action(
-    bot_prediction: str,
-    market_trend: str,
-    mode: str = "FUTURES",
-    adx_1h: float = 0.0,
-    adx_15m: float = 0.0,
-    sentiment: str = "NEUTRAL",
-) -> tuple[str, str]:
-    """Return (FUTURES, side) or (SKIP, reason). Spot is not a venue."""
-    if bot_prediction == "NONE":
-        return "SKIP", "no_prediction"
-    if market_trend != "NONE":
-        direction = market_trend
-    else:
-        direction = bot_prediction
-
-    side = "BUY" if direction == "BULL" else "SELL"
-    return "FUTURES", side
-
-
 async def should_enter(
     redis,
     symbol: str,
@@ -136,60 +117,39 @@ async def should_enter(
     if packet and _stale(packet, now):
         packet = None
 
-    # Require a fresh researcher packet — no packet means no entry
-    if not packet or not settings.research_enabled:
-        return Decision(False, "no_research_packet", packet=None, rules=rules)
-
     bot_pred = compute_bot_prediction(predicted_change_pct, confidence)
-    adx_15m = float(packet.get("adx", 0.0)) if packet else 0.0
+    if bot_pred == "NONE":
+        return Decision(False, "alignment_skip:no_prediction", packet=packet, rules=rules)
+    side = "BUY" if bot_pred == "BULL" else "SELL"
 
+    # 1h trend can veto the prediction, never flip it
     market = compute_market_trend(
         ema21, ema50, packet, regime=regime, mode="FUTURES", bot_prediction=bot_pred,
         structure=structure,
     )
+    if market != "NONE" and market != bot_pred:
+        return Decision(False, f"trend_contradicts:{market.lower()}", packet=packet, rules=rules)
+    conf_adj = 1.15 if market == bot_pred else 1.0
 
-    venue, side_or_reason = get_aligned_action(
-        bot_pred, market, "FUTURES", adx_1h=adx, adx_15m=adx_15m, sentiment=sentiment,
-    )
-    if venue == "SKIP":
-        return Decision(False, f"alignment_skip:{side_or_reason}", packet=packet, rules=rules)
-
-    # Researcher agreement check — contradictions block, never flip side
-    pkt_side_raw = packet.get("pred_1h_close_side", "")
-    pkt_conf = float(packet.get("confidence") or 0)
-    pkt_armed = packet.get("arm", False)
+    # Researcher only scales the trade
+    pkt_side_raw = packet.get("pred_1h_close_side", "") if packet else ""
     researcher_side = "BUY" if pkt_side_raw == "bull" else ("SELL" if pkt_side_raw == "bear" else "")
-
     if not researcher_side:
-        return Decision(False, "no_research_packet:no_side", packet=packet, rules=rules)
-
-    if researcher_side != side_or_reason:
-        return Decision(
-            False,
-            f"researcher_contradicts:{pkt_side_raw}@{pkt_conf:.2f}",
-            packet=packet, rules=rules,
-        )
-
-    # Researcher agrees — armed gets a boost, unarmed gets a penalty + smaller size
-    if pkt_armed:
-        conf_adj_researcher = 1.10
+        size_adj = 0.70
+    elif researcher_side != side:
+        # Its invalidation level is for the other side, so keep it off this trade
+        size_adj = 0.50
+        packet = None
+    elif packet.get("arm", False):
+        conf_adj *= 1.10
         size_adj = 1.0
     else:
-        conf_adj_researcher = 0.90
+        conf_adj *= 0.90
         size_adj = 0.70
-
-    # Trend alignment confidence multiplier
-    conf_adj = 1.0
-    if market != "NONE" and bot_pred == market:
-        conf_adj *= 1.15
-    elif market != "NONE" and bot_pred != market:
-        conf_adj *= 0.85
-
-    conf_adj *= conf_adj_researcher
 
     return Decision(
         True, "aligned",
         packet=packet, rules=rules,
-        venue="FUTURES", side=side_or_reason,
+        venue="FUTURES", side=side,
         confidence_adj=conf_adj, size_adj=size_adj,
     )

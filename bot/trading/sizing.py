@@ -66,6 +66,38 @@ def calculate_position_size(
     return round(quantity, 8), round(notional, 4)
 
 
+def max_stop_pct(leverage: int) -> float:
+    """Widest allowed stop: sl_max_pct, and never more than a 3.8% leveraged loss."""
+    return min(settings.sl_max_pct, 3.8 / max(leverage, 1))
+
+
+def stop_distance_pct(atr_pct: float | None, leverage: int) -> float:
+    """Stop distance in price %: ATR x sl_atr_mult, clamped to [sl_min_pct, max_stop_pct]."""
+    cap = max_stop_pct(leverage)
+    floor = min(settings.sl_min_pct, cap)
+    base = atr_pct * settings.sl_atr_mult if atr_pct and atr_pct > 0 else floor
+    return max(floor, min(cap, base))
+
+
+def clamp_stop(entry_price: float, side: str, stop_loss: float, leverage: int) -> float:
+    """Move a stop (e.g. zone-based) so its distance sits within [sl_min_pct, max_stop_pct]."""
+    cap = max_stop_pct(leverage)
+    floor = min(settings.sl_min_pct, cap)
+    dist_pct = abs(entry_price - stop_loss) / entry_price * 100
+    dist_pct = max(floor, min(cap, dist_pct))
+    if side == "BUY":
+        return round(entry_price * (1 - dist_pct / 100), 8)
+    return round(entry_price * (1 + dist_pct / 100), 8)
+
+
+def cap_take_profit(entry_price: float, side: str, stop_loss: float, take_profit: float) -> float:
+    """Keep TP within tp_max_sl_multiple stop distances of entry."""
+    max_dist = abs(entry_price - stop_loss) * settings.tp_max_sl_multiple
+    if side == "BUY":
+        return round(min(take_profit, entry_price + max_dist), 8)
+    return round(max(take_profit, entry_price - max_dist), 8)
+
+
 def calculate_sl_tp_prices(
     entry_price: float,
     mode: str,
@@ -77,22 +109,17 @@ def calculate_sl_tp_prices(
 ) -> tuple[float, float]:
     """Return (stop_loss_price, take_profit_price).
 
-    Both SL and TP stretch with ATR so volatile pairs get wider stops.
-    SL is capped so leveraged loss never exceeds 6%.
-    TP: 1.5x ATR floored at config default, capped at 8%.
+    SL distance comes from stop_distance_pct (ATR-scaled, clamped).
+    TP: 1.5x ATR floored at config default, capped at 8%. The caller caps it
+    further with cap_take_profit.
     """
     _lev = leverage if leverage is not None else settings.futures_leverage
-    _default_sl = sl_pct if sl_pct is not None else settings.stop_loss_percent
     _default_tp = tp_pct if tp_pct is not None else settings.take_profit_percent
-    # Max SL price move so leveraged loss stays under ~4%
-    # At 5x: 0.76% price → 3.8% leveraged + slippage ≈ 4%
-    max_sl_pct = max(0.5, 3.8 / max(_lev, 1))
+    _sl_pct = stop_distance_pct(atr_pct, _lev)
 
     if atr_pct is not None and atr_pct > 0:
-        _sl_pct = max(_default_sl, min(max_sl_pct, atr_pct * 1.2))
         _tp_pct = max(_default_tp, min(8.0, atr_pct * 1.5))
     else:
-        _sl_pct = min(_default_sl, max_sl_pct)
         _tp_pct = _default_tp
 
     if side == "BUY":

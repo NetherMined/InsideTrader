@@ -44,6 +44,7 @@ services:
         condition: service_healthy
     volumes:
       - ./bot:/app/bot
+      - ./baseline:/app/baseline
       - ml_models:/app/bot/analysis/models
       - bot_logs:/app/logs
 

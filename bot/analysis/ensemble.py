@@ -1,7 +1,8 @@
 """Ensemble stacking pipeline for FeaturesGrok.
 
 Three classifiers (XGBoost, LightGBM, CatBoost) vote on whether the price
-will move more than the round-trip fee within the next horizon.
+will rise beyond fees, fall beyond fees, or stay flat within the next horizon.
+Labels are -1 / 0 / +1, encoded internally as 0 / 1 / 2.
 
 Additional models:
 - LightGBM momentum score from short-term price/volume features
@@ -55,8 +56,8 @@ class EnsemblePredictor:
     """Voting ensemble of XGB / LGBM / CatBoost classifiers.
 
     predict() returns (direction, confidence, votes, momentum_score, regime).
-    direction: +1 / -1 / 0
-    confidence: fraction of models agreeing with the majority side
+    direction: +1 / -1 / 0 (0 = flat or no majority)
+    confidence: chosen side's share of the up+down probability (0.5-1.0 when a side is chosen)
     """
 
     def __init__(self, symbol: str):
@@ -80,7 +81,7 @@ class EnsemblePredictor:
                 n_jobs=-1,
                 verbosity=0,
                 early_stopping_rounds=20,
-                eval_metric="logloss",
+                eval_metric="mlogloss",
             )
         if lgb is not None:
             models["lgbm"] = lgb.LGBMClassifier(
@@ -118,10 +119,14 @@ class EnsemblePredictor:
 
         self._feature_cols = [c for c in FEATURE_COLS if c in X.columns]
         X = X[self._feature_cols]
+        y_enc = y_cls.astype(int) + 1
 
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y_cls, test_size=0.2, shuffle=False
+            X, y_enc, test_size=0.2, shuffle=False
         )
+        if set(y_train.unique()) != {0, 1, 2}:
+            logger.warning(f"{self.symbol}: ensemble needs up/flat/down examples, got {sorted(y_train.unique())}")
+            return {}
 
         self._models = self._make_classifiers()
         metrics: dict[str, float] = {}
@@ -151,7 +156,8 @@ class EnsemblePredictor:
                     n_jobs=-1,
                     verbose=-1,
                 )
-                self._momentum_model.fit(X_train[mom_cols], y_train)
+                # Probability of any fee-sized move (up or down)
+                self._momentum_model.fit(X_train[mom_cols], (y_train != 1).astype(int))
             except Exception as exc:
                 logger.debug(f"{self.symbol}: momentum model failed ({exc})")
 
@@ -197,32 +203,33 @@ class EnsemblePredictor:
             return empty
 
         votes: dict[str, int] = {}
-        probs: list[float] = []
+        side_probs: dict[str, dict[int, float]] = {}
         for name, model in self._models.items():
             try:
                 proba = model.predict_proba(row)[0]
-                classes = list(model.classes_)
-                up_idx = classes.index(1) if 1 in classes else -1
-                p_up = float(proba[up_idx]) if 0 <= up_idx < len(proba) else float(max(proba))
-                side = 1 if p_up >= 0.5 else -1
-                votes[name] = side
-                probs.append(p_up if side == 1 else 1 - p_up)
+                classes = [int(c) for c in np.ravel(model.classes_)]
+                p = {cls - 1: float(proba[i]) for i, cls in enumerate(classes)}
+                votes[name] = max(p, key=p.get)
+                side_probs[name] = p
             except Exception:
                 continue
 
         if not votes:
             return empty
 
-        up_votes = sum(1 for v in votes.values() if v > 0)
-        down_votes = sum(1 for v in votes.values() if v < 0)
-        if up_votes > down_votes:
-            direction = 1
-        elif down_votes > up_votes:
-            direction = -1
-        else:
-            direction = 0
+        # A side needs a strict majority of all models; flat or a split vote means no trade
+        direction = 0
+        for side in (1, -1):
+            if sum(1 for v in votes.values() if v == side) * 2 > len(votes):
+                direction = side
 
-        confidence = float(np.mean(probs)) if probs else 0.0
+        # Flat is settled by the vote; confidence is P(our side | a fee-sized move happens),
+        # which keeps the 0.5-1.0 scale the binary up/down thresholds were tuned for.
+        confidence = 0.0
+        if direction != 0:
+            p_side = float(np.mean([p.get(direction, 0.0) for p in side_probs.values()]))
+            p_opp = float(np.mean([p.get(-direction, 0.0) for p in side_probs.values()]))
+            confidence = p_side / (p_side + p_opp) if p_side + p_opp > 0 else 0.0
         confidence = max(0.0, min(confidence, 0.92))
 
         momentum_score = 0.0
@@ -260,7 +267,7 @@ class EnsemblePredictor:
 
     def _path(self, name: str) -> str:
         safe = self.symbol.replace("/", "_")
-        return os.path.join(MODELS_DIR, f"{safe}_ens_{name}.pkl")
+        return os.path.join(MODELS_DIR, f"{safe}_ens3_{name}.pkl")
 
     def save(self) -> None:
         os.makedirs(MODELS_DIR, exist_ok=True)

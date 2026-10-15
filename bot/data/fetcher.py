@@ -70,7 +70,7 @@ async def fetch_pair(symbol: str, timeframe: str, exchange: ccxt.binance) -> int
         since_dt = last_time + timedelta(milliseconds=_timeframe_to_ms(timeframe))
     else:
         # Sub-hourly timeframes cap at 30 days to avoid fetching years of dense candles on first run
-        _tf_max = {"5m": 30, "15m": 30, "30m": 30}
+        _tf_max = {"1m": 3, "5m": 30, "15m": 30, "30m": 30}
         max_days = _tf_max.get(timeframe, LOOKBACK_DAYS)
         since_dt = datetime.now(timezone.utc) - timedelta(days=max_days)
 
