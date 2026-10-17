@@ -36,7 +36,7 @@ from sqlalchemy import text
 
 from bot.config import settings
 from bot.db.connection import async_session
-from bot.trading.executor import _TRAIL_ACTIVATION_PCT, _TRAIL_REVERSAL_PCT
+from bot.trading.executor import _TRAIL_ACTIVATION_PCT
 from bot.trading.invalidation import packet_invalidation, is_past_invalidation
 from bot.trading.pnl import compute_pnl
 from bot.trading.sizing import calculate_sl_tp_prices, cap_take_profit, stop_distance_pct
@@ -55,6 +55,7 @@ KEEP_DAYS = 30
 class Rules:
     leverage: int
     trail_min_raw_pct: float
+    trail_reversal_raw_pct: float = settings.trail_reversal_raw_pct
     inv_side_check: bool = True
     inv_min_hold_min: float = settings.invalidation_min_hold_minutes
     inv_buffer_pct: float = settings.invalidation_buffer_pct
@@ -135,7 +136,7 @@ def simulate(
     entry = quote * (1 + rules.slip) if side == "BUY" else quote * (1 - rules.slip)
     sign = 1.0 if side == "BUY" else -1.0
     max_raw_loss = 3.8 / max(lev, 1)
-    trail_raw = _TRAIL_REVERSAL_PCT / max(lev, 1)
+    trail_raw = rules.trail_reversal_raw_pct
     peak: float | None = None
     mfe15 = mae15 = 0.0
     t0 = candles.t[i0]

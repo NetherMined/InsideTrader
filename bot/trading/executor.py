@@ -140,7 +140,6 @@ async def _get_macro_trend(redis: aioredis.Redis) -> str:
     await redis.setex(_MACRO_TREND_CACHE_KEY, _MACRO_TREND_CACHE_TTL, trend)
     return trend
 _TRAIL_ACTIVATION_PCT = 1.0    # arm trail once effective profit clears fees (~1% covers round-trip at 5x)
-_TRAIL_REVERSAL_PCT = 0.5      # trail by 0.5% effective from peak
 _TP_TRAIL_PREFIX = "bot:tp_trail:"  # TP follower anchor per position
 _FORCE_TRADE_MODE_KEY = "bot:force_trade_mode"  # SPOT / FUTURES / DYNAMIC
 _DISABLE_FUTURES_BUY_KEY = "bot:disable_futures_buy"  # 1 = gate FUTURES BUY to SPOT BUY
@@ -368,7 +367,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
                     new_best = min(current_price, trail_best or current_price)
                 if trail_best is None or new_best != trail_best:
                     await redis.setex(trail_key, 3600, str(new_best))
-                trail_raw_pct = _TRAIL_REVERSAL_PCT / max(leverage, 1)
+                trail_raw_pct = settings.trail_reversal_raw_pct
                 if side == "BUY":
                     trail_trigger = new_best * (1 - trail_raw_pct / 100)
                     if current_price < trail_trigger and raw_pnl_pct >= settings.trail_min_profit_raw_pct:

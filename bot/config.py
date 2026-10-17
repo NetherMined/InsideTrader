@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     entry_cost_check: str = "log"           # path-mode entry cost check: off | log (record only) | enforce (skip)
     entry_max_slippage_pct: float = 0.10    # round-trip book slippage above this (or a thin book) fails the check
     trail_min_profit_raw_pct: float = 0.40  # trailing/TP-follower exits only fire once price moved this far (covers fees + exit slippage)
+    trail_reversal_raw_pct: float = 0.50    # trailing stop closes on this raw price pullback from peak (independent of leverage)
 
     heat_limit_pct: float = 40.0
     max_single_symbol_heat_pct: float = 10.0
