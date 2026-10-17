@@ -211,3 +211,81 @@ class DerivsBar(Base):
     taker_buy_quote = Column(Float)   # kline taker buy quote volume
     quote_volume = Column(Float)      # kline quote volume
     funding = Column(Float)           # last settled funding rate as of the bar
+
+
+class TrendAccount(Base):
+    """Trend sleeve paper account (one row). Cash moves with every fill and funding payment."""
+    __tablename__ = "trend_account"
+
+    id = Column(Integer, primary_key=True)
+    start_capital = Column(Float, nullable=False)
+    cash = Column(Float, nullable=False)
+    peak_equity = Column(Float, nullable=False)
+    halted = Column(Boolean, nullable=False, default=False)
+    halted_reason = Column(Text)
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_stop_check = Column(DateTime(timezone=True))
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class TrendPosition(Base):
+    """Open trend sleeve long, one per symbol."""
+    __tablename__ = "trend_positions"
+
+    symbol = Column(String(30), primary_key=True)
+    qty = Column(Float, nullable=False)
+    entry_price = Column(Float, nullable=False)    # average fill price
+    stop_price = Column(Float, nullable=False)
+    opened_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class TrendFill(Base):
+    __tablename__ = "trend_fills"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    time = Column(DateTime(timezone=True), nullable=False, index=True)
+    symbol = Column(String(30), nullable=False)
+    side = Column(String(4), nullable=False)       # BUY / SELL
+    qty = Column(Float, nullable=False)
+    ref_price = Column(Float, nullable=False)      # market price before costs
+    fill_price = Column(Float, nullable=False)     # after slippage
+    fee_usdt = Column(Float, nullable=False)
+    reason = Column(String(20), nullable=False)    # initial / rebalance / stop / kill
+
+
+class TrendFunding(Base):
+    __tablename__ = "trend_funding"
+    __table_args__ = (UniqueConstraint("symbol", "time", name="uq_trend_funding"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    time = Column(DateTime(timezone=True), nullable=False)
+    symbol = Column(String(30), nullable=False)
+    rate = Column(Float, nullable=False)
+    qty = Column(Float, nullable=False)
+    mark_price = Column(Float, nullable=False)
+    amount_usdt = Column(Float, nullable=False)    # paid (+) or received (-) by the long
+
+
+class TrendRebalance(Base):
+    """One row per executed rebalance; the primary key makes a rebalance run at most once."""
+    __tablename__ = "trend_rebalances"
+
+    signal_day = Column(String(10), primary_key=True)  # YYYY-MM-DD of the close the signal used
+    executed_at = Column(DateTime(timezone=True), nullable=False)
+    equity_before = Column(Float, nullable=False)
+    orders = Column(Integer, nullable=False)
+    targets = Column(JSON)
+
+
+class StrategyEquity(Base):
+    """Daily equity snapshot per strategy, for the side-by-side comparison."""
+    __tablename__ = "strategy_equity"
+    __table_args__ = (UniqueConstraint("day", "strategy", name="uq_strategy_equity"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    day = Column(String(10), nullable=False)       # YYYY-MM-DD (UTC) the snapshot was taken
+    strategy = Column(String(20), nullable=False)  # trend / current_bot
+    equity = Column(Float, nullable=False)
+    open_positions = Column(Integer, nullable=False)
+    taken_at = Column(DateTime(timezone=True), server_default=func.now())
+

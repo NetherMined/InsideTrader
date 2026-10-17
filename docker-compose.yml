@@ -48,6 +48,24 @@ services:
       - ml_models:/app/bot/analysis/models
       - bot_logs:/app/logs
 
+  trend:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: ["python", "-m", "bot.trend.runner"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./bot:/app/bot
+
   api:
     build:
       context: .
