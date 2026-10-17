@@ -42,6 +42,7 @@ from bot.trading.journal import (
 )
 from bot.trading.paper import simulate_buy, simulate_sell, simulate_buy_back, simulate_sell_short
 from bot.trading.pnl import compute_pnl
+from bot.trading.costs import entry_cost_check
 from bot.trading.invalidation import packet_invalidation, is_past_invalidation
 from bot.trading.orders import (
     place_spot_market_buy, place_spot_market_sell,
@@ -894,6 +895,20 @@ async def _try_open_trade(
 
     leverage = lev if mode == "FUTURES" else 1
 
+    # Live round-trip cost vs what the path labels assumed. "log" records it without changing
+    # entries, so the forward test stays clean; "enforce" skips the entry.
+    cost_check = None
+    if path_mode and settings.entry_cost_check in ("log", "enforce"):
+        cost_check = await entry_cost_check(symbol, notional)
+        if cost_check and cost_check["would_skip"]:
+            reason = ("thin order book" if cost_check["thin"] else
+                      f"round-trip slippage {cost_check['roundtrip_slippage_pct']:.3f}% > "
+                      f"{cost_check['max_slippage_pct']}%")
+            if settings.entry_cost_check == "enforce":
+                logger.info(f"{symbol}: skip {side} — {reason}")
+                return False
+            logger.info(f"{symbol}: cost check would have skipped ({reason}) — log only, entering")
+
     logger.info(
         f"Opening {'[PAPER] ' if paper else ''}{mode} {side} trade: {symbol} "
         f"@ ${current_price:.4f} | qty={quantity:.6f} | "
@@ -946,6 +961,8 @@ async def _try_open_trade(
         "structure_confirmed": struct_state.confirmed if struct_state else False,
         "entry_model": settings.entry_model,
     }
+    if cost_check:
+        entry_indicators["cost_check"] = cost_check
     pkt = getattr(pair, "research_packet", None)
     if isinstance(pkt, dict):
         entry_indicators["research"] = {

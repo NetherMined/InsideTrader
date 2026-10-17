@@ -458,4 +458,10 @@ Phase 7 found nothing in price/volume features after costs. Phase 8 tests data t
 - **8.2d started 2026-10-15 13:49 UTC** (first path trades: CRCL and COIN SELL, 0.80% stop / 1.20% TP, ~$75 notional). Check-ins:
   - Windows task "InsideTrader Forward Check" runs `bot/tools/ai_review/forward_check.ps1` on **Oct 22 and Oct 29 at 09:07**. It shows live paper stats with a pass/fail hint (pop-up plus `...\InsideTrader-ai-review\logsorward_check.log`).
   - In-session reminders are set for the same days at 09:11, if this Claude session is still open.
+- **Cost check, log-only (Oct 15; idea from Experiments' `costs.py`, approved by user).**
+  - `bot/trading/costs.py` holds the shared order-book walk (paper fills now use it, at 100 levels deep) plus `entry_cost_check()`.
+  - Every path-mode entry records `entry_indicators.cost_check`: round-trip slippage, round-trip cost incl. fees, thin-book flag, and `would_skip` (slippage > `entry_max_slippage_pct` = 0.10%, or a thin book).
+  - `entry_cost_check = "log"` never blocks. After the forward test, compare trades with `would_skip` true vs false; only switch to `"enforce"` if the flagged trades were the losers. 3 tests.
+  - Not ported (see the review in chat): graduated loss response and recovery researcher (Experiments' own Oct 9 back-test showed no benefit), news filter (untested), stricter researcher gate (researcher ≈ 49% direction accuracy).
+- **Known issue (not fixed):** while the bot waits for startup confirmation, `run_trading_engine` does not monitor open positions. Restarts with positions open leave them unmanaged until confirmed. That matters before live trading.
 - **8.2d Forward test** with the 7.3c pass/fail rules (≥14 days, ≥500 entries, CI lower bound > 0 in both the baseline sim and live paper P&L).

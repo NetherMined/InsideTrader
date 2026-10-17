@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     taker_fee_rate: float = 0.0005  # Binance USDT-M VIP0 taker
     paper_slippage_pct: float = 0.03       # per paper fill when the live order book can't be read (measured median 0.018% at ~$50)
     paper_stop_slippage_pct: float = 0.05  # extra on stop-loss exits — assumption: spreads widen in the moves that trigger stops
+    entry_cost_check: str = "log"           # path-mode entry cost check: off | log (record only) | enforce (skip)
+    entry_max_slippage_pct: float = 0.10    # round-trip book slippage above this (or a thin book) fails the check
     trail_min_profit_raw_pct: float = 0.40  # trailing/TP-follower exits only fire once price moved this far (covers fees + exit slippage)
 
     heat_limit_pct: float = 40.0

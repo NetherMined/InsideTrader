@@ -7,11 +7,11 @@ Records everything to DB identically to live trading.
 
 import json
 from datetime import datetime, timezone
-import ccxt.async_support as ccxt
 from loguru import logger
 import redis.asyncio as aioredis
 
 from bot.config import settings
+from bot.trading.costs import book_slippage
 from bot.trading.pnl import compute_pnl
 
 PAPER_CAPITAL_KEY = "paper:capital_usdt"
@@ -20,28 +20,15 @@ async def fill_slippage(symbol: str, side: str, notional: float, stop: bool = Fa
     """Fraction a market order of `notional` USDT fills away from mid, read from the live futures book.
 
     Walks asks for a BUY and bids for a SELL. Falls back to paper_slippage_pct when the book
-    can't be read. Stop-loss exits add paper_stop_slippage_pct for fast markets.
+    can't be read or is too thin for the size. Stop-loss exits add paper_stop_slippage_pct.
     """
     slip = settings.paper_slippage_pct / 100
-    ex = ccxt.binance({"options": {"defaultType": "future"}})
-    try:
-        book = await ex.fetch_order_book(symbol if ":" in symbol else f"{symbol}:USDT", 20)
-        bids, asks = book.get("bids") or [], book.get("asks") or []
-        if bids and asks:
-            mid = (bids[0][0] + asks[0][0]) / 2
-            left, cost = notional, 0.0
-            for price, qty in (asks if side == "BUY" else bids):
-                take = min(left, price * qty)
-                cost += take * abs(price / mid - 1)
-                left -= take
-                if left <= 0:
-                    break
-            if left <= 0:
-                slip = cost / notional
-    except Exception as e:
-        logger.debug(f"{symbol}: order book unavailable for paper slippage ({e}), using default")
-    finally:
-        await ex.close()
+    book = await book_slippage(symbol, notional)
+    pct = book and book["buy_pct" if side == "BUY" else "sell_pct"]
+    if pct is not None:
+        slip = pct / 100
+    else:
+        logger.debug(f"{symbol}: no usable order book for paper slippage, using default")
     if stop:
         slip += settings.paper_stop_slippage_pct / 100
     return slip
