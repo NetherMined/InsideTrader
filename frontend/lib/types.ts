@@ -216,3 +216,62 @@ export interface MarketSentiment {
   estimated_daily_profit_usdt: number;
   estimated_daily_profit_pct: number;
 }
+
+export type ResearchCell = string | number | boolean | null;
+export type ResearchRow = Record<string, ResearchCell>;
+
+export interface ResearchMeta {
+  key: string;
+  title: string;
+  description: string | null;
+  phase: string | null;
+  updated_at: string | null;
+  row_count: number;
+}
+
+export interface ResearchSet extends ResearchMeta {
+  rows: ResearchRow[];
+}
+
+export interface ComparisonSummary {
+  strategy: string;
+  equity_now: number;
+  return_pct: number;
+  max_drawdown_pct: number;
+  trades: number;
+  open_positions: number;
+}
+
+export interface ComparisonPoint {
+  day: string;
+  strategy: string;
+  equity: number;
+  return_pct: number;
+  drawdown_pct: number;
+  trades: number;
+}
+
+export interface TrendHolding {
+  symbol: string;
+  qty: number;
+  entry_price: number;
+  price: number;
+  value_usd: number;
+  pnl_pct: number;
+  weight_pct: number;
+  stop_price: number;
+  opened: string;
+}
+
+export interface Comparison {
+  running: boolean;
+  as_of: string | null;
+  started_at: string | null;
+  start_capital: number | null;
+  days: number;
+  halted: boolean;
+  halted_reason: string | null;
+  summary: ComparisonSummary[];
+  daily: ComparisonPoint[];
+  holdings: TrendHolding[];
+}

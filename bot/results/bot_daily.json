@@ -1,0 +1,147 @@
+{
+ "key": "bot_daily",
+ "title": "Bot P&L per day",
+ "description": "Closed paper trades summed per UTC day from launch to Oct 16, 2026.",
+ "phase": "Phase 1",
+ "updated_at": "2026-10-17",
+ "rows": [
+  {
+   "day": "2026-09-24",
+   "trades": 478,
+   "pnl_usd": 21.21,
+   "wins": 225
+  },
+  {
+   "day": "2026-09-25",
+   "trades": 268,
+   "pnl_usd": -63.84,
+   "wins": 98
+  },
+  {
+   "day": "2026-09-26",
+   "trades": 67,
+   "pnl_usd": -28.97,
+   "wins": 6
+  },
+  {
+   "day": "2026-09-27",
+   "trades": 64,
+   "pnl_usd": -29.55,
+   "wins": 6
+  },
+  {
+   "day": "2026-09-28",
+   "trades": 14,
+   "pnl_usd": -13.91,
+   "wins": 1
+  },
+  {
+   "day": "2026-09-29",
+   "trades": 24,
+   "pnl_usd": 7.88,
+   "wins": 7
+  },
+  {
+   "day": "2026-09-30",
+   "trades": 36,
+   "pnl_usd": -14.15,
+   "wins": 6
+  },
+  {
+   "day": "2026-10-01",
+   "trades": 94,
+   "pnl_usd": -32.12,
+   "wins": 44
+  },
+  {
+   "day": "2026-10-02",
+   "trades": 134,
+   "pnl_usd": -25.75,
+   "wins": 56
+  },
+  {
+   "day": "2026-10-03",
+   "trades": 56,
+   "pnl_usd": 6.11,
+   "wins": 9
+  },
+  {
+   "day": "2026-10-04",
+   "trades": 92,
+   "pnl_usd": -34.23,
+   "wins": 14
+  },
+  {
+   "day": "2026-10-05",
+   "trades": 136,
+   "pnl_usd": 0.39,
+   "wins": 22
+  },
+  {
+   "day": "2026-10-06",
+   "trades": 179,
+   "pnl_usd": 13.46,
+   "wins": 45
+  },
+  {
+   "day": "2026-10-07",
+   "trades": 159,
+   "pnl_usd": 9.86,
+   "wins": 36
+  },
+  {
+   "day": "2026-10-08",
+   "trades": 79,
+   "pnl_usd": -7.86,
+   "wins": 22
+  },
+  {
+   "day": "2026-10-09",
+   "trades": 88,
+   "pnl_usd": -231.02,
+   "wins": 32
+  },
+  {
+   "day": "2026-10-10",
+   "trades": 11,
+   "pnl_usd": -128.56,
+   "wins": 2
+  },
+  {
+   "day": "2026-10-11",
+   "trades": 4,
+   "pnl_usd": -1.93,
+   "wins": 1
+  },
+  {
+   "day": "2026-10-12",
+   "trades": 10,
+   "pnl_usd": -4.28,
+   "wins": 3
+  },
+  {
+   "day": "2026-10-13",
+   "trades": 21,
+   "pnl_usd": -0.55,
+   "wins": 7
+  },
+  {
+   "day": "2026-10-14",
+   "trades": 66,
+   "pnl_usd": -7.66,
+   "wins": 23
+  },
+  {
+   "day": "2026-10-15",
+   "trades": 62,
+   "pnl_usd": -1.67,
+   "wins": 36
+  },
+  {
+   "day": "2026-10-16",
+   "trades": 27,
+   "pnl_usd": 0.36,
+   "wins": 17
+  }
+ ]
+}

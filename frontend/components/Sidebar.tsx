@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, TrendingUp, Sparkles,
-  Activity, History, BarChart2, Settings, CandlestickChart, UserCircle,
+  Activity, History, BarChart2, Settings, CandlestickChart, UserCircle, FlaskConical,
 } from 'lucide-react';
 import { useCurrency } from '@/lib/currency';
 
@@ -17,6 +17,7 @@ const NAV = [
   { href: '/history', icon: History, label: 'History' },
   { href: '/charts', icon: CandlestickChart, label: 'Charts' },
   { href: '/backtests', icon: BarChart2, label: 'Backtests' },
+  { href: '/test-results', icon: FlaskConical, label: 'Test Results' },
   { href: '/settings', icon: Settings, label: 'Settings' },
 ];
 

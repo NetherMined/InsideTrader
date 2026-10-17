@@ -1,0 +1,108 @@
+{
+ "key": "phases",
+ "title": "Testing history",
+ "description": "Each research phase: the question, method, finding and decision.",
+ "phase": "All",
+ "updated_at": "2026-10-17",
+ "rows": [
+  {
+   "order": 1,
+   "date": "2026-10-16",
+   "phase": "Phase 1",
+   "name": "Exit replay",
+   "status": "Done",
+   "question": "Why are wins smaller than losses (avg win under $1, avg loss over $1)?",
+   "method": "Replayed the bot's 95 trades from the last 48h on 1-minute Binance candles under 8 trailing-stop widths and 4 stop distances.",
+   "finding": "The trailing stop closed winners on a ~0.17% pullback while stops ran ~1.1%. Wider trails grew wins but turned more trades into stop-losses; tighter stops were worse. No exit rule made the trades profitable.",
+   "decision": "Keep exits roughly as they are; switch the trail to a fixed 0.5% of price."
+  },
+  {
+   "order": 2,
+   "date": "2026-10-16",
+   "phase": "Phase 2",
+   "name": "Trailing stop change",
+   "status": "Live",
+   "question": "Make the trail independent of leverage.",
+   "method": "New setting trail_reversal_raw_pct = 0.50 used by the live exit loop and the daily baseline tool; 3 new unit tests.",
+   "finding": "Shipped and running since the Oct 16 restart. Nothing committed yet.",
+   "decision": "Monitor; this is a small improvement, not a fix."
+  },
+  {
+   "order": 3,
+   "date": "2026-10-16",
+   "phase": "Phase 3",
+   "name": "Signal and setup scan",
+   "status": "Done",
+   "question": "Do any of the bot's signals or researcher setups predict direction?",
+   "method": "21,600 researcher packets, 41,000 ML predictions and 794 trades compared with the real move 15, 30 and 60 minutes later, grouped by every indicator, setup, confidence level and derivatives reading.",
+   "finding": "Nothing clears the 0.13% round-trip cost. The best-looking groups were shorts in a falling market. Highest researcher confidence was the least accurate; long trades were right only 43.6% of the time.",
+   "decision": "Stop tuning the current signals."
+  },
+  {
+   "order": 4,
+   "date": "2026-10-16",
+   "phase": "Phase 4",
+   "name": "BTC trend filter and longer holds",
+   "status": "Done",
+   "question": "Does trading with BTC's trend, or holding 4h to 24h, create an edge?",
+   "method": "Same signals checked at 1h, 4h and 24h, split by BTC trend; simple trend rules tested on a year of 1h candles for 440 coins.",
+   "finding": "Only shorting during the recent decline made money. Trading with BTC's 4h direction roughly halved trade losses but stayed negative. Trend rules lost at 4h in every quarter.",
+   "decision": "Look outside the current setup."
+  },
+  {
+   "order": 5,
+   "date": "2026-10-16",
+   "phase": "Phase 5a",
+   "name": "Independent strategy research",
+   "status": "Done",
+   "question": "Which known crypto strategies have evidence of working after costs?",
+   "method": "Literature review plus backtests on daily candles for 657 Binance perpetuals (2021 to 2026) and funding history for the top 150.",
+   "finding": "Weekly trend-following on the 10 major coins was the only robust result. Funding carry pays little now; reversal, low-volatility and funding-contrarian strategies lose.",
+   "decision": "Shortlist five strategies for a head-to-head test."
+  },
+  {
+   "order": 6,
+   "date": "2026-10-16",
+   "phase": "Phase 5b",
+   "name": "Five shortlisted strategies",
+   "status": "Done",
+   "question": "How do the shortlisted strategies compare under one framework?",
+   "method": "Same data, costs, funding and metrics for each, plus a parameter grid to measure robustness and a 3x cost stress test.",
+   "finding": "Trend on majors (long or flat) held up in 93% of settings. Cross-coin momentum was unstable; BTC-to-alt lead-lag lost in every setting.",
+   "decision": "Trend on majors is the lead candidate."
+  },
+  {
+   "order": 7,
+   "date": "2026-10-16",
+   "phase": "Phase 5c",
+   "name": "Day-trading setups with risk rules",
+   "status": "Done",
+   "question": "Do the five supplied day-trading setups work under strict risk rules?",
+   "method": "Liquidity sweep and FVG, VWAP, volume profile with delta, breakouts, and liquidation flush coded as rules on BTC, ETH and SOL 5-minute candles (2024 to 2026), with 1% risk, hard stops, 5x cap, 3R daily limit and London/NY session only. Compared against random entries.",
+   "finding": "All five lose. Their edge before costs is close to random entries, and costs take 0.3R to 0.7R per trade because 5-minute stops are so tight. Breakeven moves and partial exits made results worse.",
+   "decision": "Do not build intraday setups."
+  },
+  {
+   "order": 8,
+   "date": "2026-10-17",
+   "phase": "Phase 6.1",
+   "name": "Trend strategy: rules and backtest check",
+   "status": "Done",
+   "question": "Does the live code reproduce the research, and which risk rules should it use?",
+   "method": "Strategy rules coded as a shared module with 10 unit tests, then a 2021-2026 day-by-day simulation through that code with real fills, real funding, Binance minimum order sizes, disaster stops and the kill switch, starting from $450.",
+   "finding": "Matches the research (2022-2025 and worst drawdown identical). With all rules: +26.5% a year, Sharpe 1.14, worst drawdown -25.8%; 2025 +1.6%, 2026 so far -3.1%. A -25% stop fired 63 times on crash wicks and cost about 4% a year; -40% fired 15 times and costs about 1.5%. Re-sizing positions between rebalances cost about 3% a year. The kill switch never triggered.",
+   "decision": "Use a -40% stop (inside the 2x liquidation level) and hold quantities between rebalances."
+  },
+  {
+   "order": 9,
+   "date": "2026-10-17",
+   "phase": "Phase 6.2",
+   "name": "Side-by-side paper test",
+   "status": "Running",
+   "question": "Does the trend strategy beat the current bot on live paper data?",
+   "method": "Trend strategy runs as its own paper bot (separate service and tables) next to the unchanged current bot. Both started from $511.82, the current bot's equity at launch. The trend bot checks funding and stops hourly and rebalances every 5 days; a snapshot of both balances is taken daily.",
+   "finding": "Started Oct 16, 22:41 UTC. Initial rebalance on the Oct 15 close: 7 longs (BTC, SOL, XRP, ADA, LINK, LTC, AVAX), about 42% of equity. First scheduled rebalance on the Oct 17 close. Results will be added here weekly.",
+   "decision": "Review after 6 to 8 weeks (8 to 11 rebalances)."
+  }
+ ]
+}

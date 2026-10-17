@@ -1,0 +1,63 @@
+{
+ "key": "robustness",
+ "title": "Strategy robustness grid",
+ "description": "Each strategy re-run across a grid of settings: median Sharpe and share of settings with Sharpe 0.5 or better.",
+ "phase": "Phase 5b",
+ "updated_at": "2026-10-17",
+ "rows": [
+  {
+   "strategy": "1 TSMOM majors long/flat (vol-target)",
+   "variants": 15,
+   "median_sharpe": 0.7345,
+   "pct_variants_sharpe_ge_0_5": 93.3333
+  },
+  {
+   "strategy": "1b TSMOM majors long/short (vol-target)",
+   "variants": 15,
+   "median_sharpe": 0.3642,
+   "pct_variants_sharpe_ge_0_5": 40.0
+  },
+  {
+   "strategy": "2 Cash&carry BTC+ETH (enter APR>10%)",
+   "variants": 15,
+   "median_sharpe": 6.2811,
+   "pct_variants_sharpe_ge_0_5": 93.3333
+  },
+  {
+   "strategy": "3 XS momentum top-20 long/short",
+   "variants": 12,
+   "median_sharpe": 0.546,
+   "pct_variants_sharpe_ge_0_5": 50.0
+  },
+  {
+   "strategy": "3b XS momentum top-20 long-only",
+   "variants": 12,
+   "median_sharpe": 0.3576,
+   "pct_variants_sharpe_ge_0_5": 16.6667
+  },
+  {
+   "strategy": "4a TSMOM long/flat WITHOUT vol-target",
+   "variants": 5,
+   "median_sharpe": 0.7258,
+   "pct_variants_sharpe_ge_0_5": 100.0
+  },
+  {
+   "strategy": "4b XS momentum long/short WITH vol-target",
+   "variants": 4,
+   "median_sharpe": 0.0809,
+   "pct_variants_sharpe_ge_0_5": 25.0
+  },
+  {
+   "strategy": "5 BTC->alt lead-lag (rolling OLS, daily)",
+   "variants": 18,
+   "median_sharpe": -0.5732,
+   "pct_variants_sharpe_ge_0_5": 0.0
+  },
+  {
+   "strategy": "5b BTC->alt catch-up rule (daily)",
+   "variants": 4,
+   "median_sharpe": -0.2021,
+   "pct_variants_sharpe_ge_0_5": 0.0
+  }
+ ]
+}

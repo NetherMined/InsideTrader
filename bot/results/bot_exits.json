@@ -1,0 +1,54 @@
+{
+ "key": "bot_exits",
+ "title": "Bot trades by exit type",
+ "description": "Closed paper trades Oct 14 19:00 to Oct 16 19:00 UTC, grouped by exit reason.",
+ "phase": "Phase 1",
+ "updated_at": "2026-10-17",
+ "rows": [
+  {
+   "exit_reason": "stop_loss",
+   "trades": 37,
+   "wins": 0,
+   "avg_pnl_usd": -0.74,
+   "total_pnl_usd": -27.37,
+   "avg_move_pct": 1.178,
+   "avg_minutes": 11.3
+  },
+  {
+   "exit_reason": "negative_timeout",
+   "trades": 3,
+   "wins": 0,
+   "avg_pnl_usd": -0.361,
+   "total_pnl_usd": -1.08,
+   "avg_move_pct": 0.588,
+   "avg_minutes": 45.2
+  },
+  {
+   "exit_reason": "max_hold",
+   "trades": 1,
+   "wins": 0,
+   "avg_pnl_usd": -0.294,
+   "total_pnl_usd": -0.29,
+   "avg_move_pct": 0.306,
+   "avg_minutes": 120.2
+  },
+  {
+   "exit_reason": "take_profit",
+   "trades": 2,
+   "wins": 2,
+   "avg_pnl_usd": 1.292,
+   "total_pnl_usd": 2.58,
+   "avg_move_pct": 1.786,
+   "avg_minutes": 1.9
+  },
+  {
+   "exit_reason": "trailing_stop",
+   "trades": 52,
+   "wins": 52,
+   "avg_pnl_usd": 0.396,
+   "total_pnl_usd": 20.6,
+   "avg_move_pct": 0.75,
+   "avg_minutes": 14.1
+  }
+ ]
+}

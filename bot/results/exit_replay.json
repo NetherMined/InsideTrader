@@ -1,0 +1,179 @@
+{
+ "key": "exit_replay",
+ "title": "Exit rule replay",
+ "description": "The bot's 95 trades from Oct 14-16 replayed on 1-minute candles under different trailing-stop widths and stop distances (worst-case order inside each candle).",
+ "phase": "Phase 1",
+ "updated_at": "2026-10-17",
+ "rows": [
+  {
+   "test": "Tighter stop",
+   "stop_scale": 0.5,
+   "trail": "Current (0.5% / leverage)",
+   "net_usd": -15.7,
+   "win_pct": 37.9,
+   "avg_win_usd": 0.334,
+   "avg_loss_usd": -0.47,
+   "stop_outs": 59
+  },
+  {
+   "test": "Tighter stop",
+   "stop_scale": 0.5,
+   "trail": "0.30% pullback",
+   "net_usd": -16.58,
+   "win_pct": 32.6,
+   "avg_win_usd": 0.425,
+   "avg_loss_usd": -0.465,
+   "stop_outs": 64
+  },
+  {
+   "test": "Tighter stop",
+   "stop_scale": 0.5,
+   "trail": "0.50% pullback",
+   "net_usd": -13.89,
+   "win_pct": 30.5,
+   "avg_win_usd": 0.568,
+   "avg_loss_usd": -0.46,
+   "stop_outs": 66
+  },
+  {
+   "test": "Tighter stop",
+   "stop_scale": 0.65,
+   "trail": "Current (0.5% / leverage)",
+   "net_usd": -17.37,
+   "win_pct": 42.1,
+   "avg_win_usd": 0.35,
+   "avg_loss_usd": -0.57,
+   "stop_outs": 55
+  },
+  {
+   "test": "Tighter stop",
+   "stop_scale": 0.65,
+   "trail": "0.30% pullback",
+   "net_usd": -18.92,
+   "win_pct": 36.8,
+   "avg_win_usd": 0.427,
+   "avg_loss_usd": -0.564,
+   "stop_outs": 60
+  },
+  {
+   "test": "Tighter stop",
+   "stop_scale": 0.65,
+   "trail": "0.50% pullback",
+   "net_usd": -15.66,
+   "win_pct": 35.8,
+   "avg_win_usd": 0.544,
+   "avg_loss_usd": -0.56,
+   "stop_outs": 61
+  },
+  {
+   "test": "Tighter stop",
+   "stop_scale": 0.8,
+   "trail": "Current (0.5% / leverage)",
+   "net_usd": -13.0,
+   "win_pct": 50.5,
+   "avg_win_usd": 0.378,
+   "avg_loss_usd": -0.663,
+   "stop_outs": 47
+  },
+  {
+   "test": "Tighter stop",
+   "stop_scale": 0.8,
+   "trail": "0.30% pullback",
+   "net_usd": -11.65,
+   "win_pct": 47.4,
+   "avg_win_usd": 0.463,
+   "avg_loss_usd": -0.649,
+   "stop_outs": 50
+  },
+  {
+   "test": "Tighter stop",
+   "stop_scale": 0.8,
+   "trail": "0.50% pullback",
+   "net_usd": -9.58,
+   "win_pct": 44.2,
+   "avg_win_usd": 0.571,
+   "avg_loss_usd": -0.633,
+   "stop_outs": 51
+  },
+  {
+   "test": "Trailing stop",
+   "stop_scale": 1.0,
+   "trail": "Current (0.5% / leverage)",
+   "net_usd": -11.05,
+   "win_pct": 56.8,
+   "avg_win_usd": 0.375,
+   "avg_loss_usd": -0.763,
+   "stop_outs": 40
+  },
+  {
+   "test": "Trailing stop",
+   "stop_scale": 1.0,
+   "trail": "0.30% pullback",
+   "net_usd": -9.42,
+   "win_pct": 52.6,
+   "avg_win_usd": 0.47,
+   "avg_loss_usd": -0.732,
+   "stop_outs": 43
+  },
+  {
+   "test": "Trailing stop",
+   "stop_scale": 1.0,
+   "trail": "0.50% pullback",
+   "net_usd": -9.13,
+   "win_pct": 48.4,
+   "avg_win_usd": 0.564,
+   "avg_loss_usd": -0.716,
+   "stop_outs": 44
+  },
+  {
+   "test": "Trailing stop",
+   "stop_scale": 1.0,
+   "trail": "0.75% pullback",
+   "net_usd": -13.59,
+   "win_pct": 42.1,
+   "avg_win_usd": 0.654,
+   "avg_loss_usd": -0.723,
+   "stop_outs": 48
+  },
+  {
+   "test": "Trailing stop",
+   "stop_scale": 1.0,
+   "trail": "1.00% pullback",
+   "net_usd": -14.52,
+   "win_pct": 37.9,
+   "avg_win_usd": 0.76,
+   "avg_loss_usd": -0.71,
+   "stop_outs": 49
+  },
+  {
+   "test": "Trailing stop",
+   "stop_scale": 1.0,
+   "trail": "Half the stop distance",
+   "net_usd": -11.77,
+   "win_pct": 46.3,
+   "avg_win_usd": 0.581,
+   "avg_loss_usd": -0.732,
+   "stop_outs": 46
+  },
+  {
+   "test": "Trailing stop",
+   "stop_scale": 1.0,
+   "trail": "0.75 x stop distance",
+   "net_usd": -12.48,
+   "win_pct": 41.1,
+   "avg_win_usd": 0.714,
+   "avg_loss_usd": -0.72,
+   "stop_outs": 48
+  },
+  {
+   "test": "Trailing stop",
+   "stop_scale": 1.0,
+   "trail": "No trailing stop",
+   "net_usd": -14.8,
+   "win_pct": 28.4,
+   "avg_win_usd": 1.153,
+   "avg_loss_usd": -0.675,
+   "stop_outs": 51
+  }
+ ]
+}

@@ -31,6 +31,7 @@ import ccxt.async_support as ccxt
 
 from api.config import settings
 from api.db import get_session, check_db, async_session as _db_session
+from api.research import router as research_router
 
 _HEAT_LIMIT_PCT = 40.0
 
@@ -42,6 +43,7 @@ app = FastAPI(
     version="1.0.0",
     description="Auto trading bot management API",
 )
+app.include_router(research_router)
 
 app.add_middleware(
     CORSMiddleware,

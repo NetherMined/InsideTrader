@@ -289,3 +289,15 @@ class StrategyEquity(Base):
     open_positions = Column(Integer, nullable=False)
     taken_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+class ResearchResult(Base):
+    """A finished test's result set shown on the dashboard's Test Results page (loaded from bot/results/*.json)."""
+    __tablename__ = "research_results"
+
+    key = Column(String(60), primary_key=True)
+    title = Column(String(120), nullable=False)
+    description = Column(Text)
+    phase = Column(String(30))
+    rows = Column(JSON, nullable=False)
+    updated_at = Column(String(10))                # YYYY-MM-DD the result was produced
+    loaded_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
