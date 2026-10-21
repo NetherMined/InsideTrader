@@ -78,3 +78,28 @@ Frontend rebuilt; every tab checked in headless Edge against the running app; ol
 ## Out of scope
 - Editing results from the page (read-only).
 - Changes to either bot's trading logic.
+
+## Addition: Trend bot tab (requested Oct 17)
+
+A tab on the Test Results page with the trend bot's full detail, next to "Side-by-side test". The current bot is
+left unchanged.
+
+### API
+`GET /api/v1/research/trend`, read-only, from the trend tables plus Redis `trend:summary`:
+- `status`: running / halted (with reason), started at, last cycle time, start capital, equity, cash, invested %,
+  peak equity, drawdown from peak, distance to the −35% kill switch, total funding paid.
+- `next_rebalance`: the next rebalance close date and when it runs (00:05 UTC the day after).
+- `targets`: all 10 coins from the latest rebalance: target weight (0 = flat) vs weight held now.
+- `holdings`: open positions (from the live summary).
+- `rebalances`: every rebalance: signal day, run time, equity before, number of orders.
+- `fills`: every fill (newest first): time, coin, side, qty, price, fee, reason (initial / rebalance / stop / kill).
+- `funding`: total and per coin, plus the latest charges.
+
+### Page
+New "Trend bot" tab: status cards (equity, invested vs cash, drawdown vs kill switch, funding paid, next rebalance
+with countdown), a "signal now" grid of the 10 coins (long / flat, target vs held weight), holdings table, rebalance
+history, fills and funding tables. Refreshes every 60 seconds.
+
+### Phases (pause after each)
+1. API endpoint + tests (next-rebalance date, status maths); check it against the live data. (done Oct 17)
+2. Tab + rebuild the frontend container; check it in the running app. (done Oct 17)

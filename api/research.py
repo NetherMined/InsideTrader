@@ -2,11 +2,13 @@
 
 GET /api/v1/research               list of result sets (no rows)
 GET /api/v1/research/comparison    trend strategy vs current bot, live
+GET /api/v1/research/trend         trend bot detail: status, signals, holdings, rebalances, fills, funding
 GET /api/v1/research/{key}         one result set with its rows
 """
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 
 import redis.asyncio as aioredis
@@ -154,6 +156,171 @@ async def comparison(session: Annotated[AsyncSession, Depends(get_session)]):
     live = json.loads(raw) if raw else None
     return build_comparison(acct.start_capital, acct.started_at.isoformat(), snaps, live,
                             {"trend": dict(trend), "current_bot": dict(bot)}, today)
+
+
+# Trend bot detail. Rebalance calendar and risk limits mirror bot/trend/strategy.py (the API image does not include bot/).
+TREND_EPOCH = date(2021, 1, 1)
+TREND_HOLD_DAYS = 5
+TREND_KILL_DRAWDOWN = 0.35
+TREND_MAJORS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+                "DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "LTCUSDT")
+
+
+class TrendStatus(BaseModel):
+    state: str
+    halted_reason: str | None
+    started_at: str | None
+    last_cycle: str | None
+    start_capital: float
+    equity: float
+    cash: float
+    invested: float
+    invested_pct: float
+    return_pct: float
+    peak_equity: float
+    drawdown_pct: float
+    kill_drawdown_pct: float
+    kill_equity: float
+    funding_paid: float
+
+
+class NextRebalance(BaseModel):
+    signal_day: str
+    runs_at: str
+
+
+class TrendTarget(BaseModel):
+    symbol: str
+    signal: str
+    target_pct: float
+    held_pct: float
+
+
+class TrendRebalanceRow(BaseModel):
+    signal_day: str
+    executed_at: str
+    equity_before: float
+    orders: int
+
+
+class TrendFillRow(BaseModel):
+    time: str
+    symbol: str
+    side: str
+    qty: float
+    fill_price: float
+    notional: float
+    fee_usdt: float
+    reason: str
+
+
+class FundingBySymbol(BaseModel):
+    symbol: str
+    payments: int
+    amount_usdt: float
+
+
+class FundingRow(BaseModel):
+    time: str
+    symbol: str
+    rate: float
+    amount_usdt: float
+
+
+class TrendDetail(BaseModel):
+    running: bool
+    status: TrendStatus | None
+    next_rebalance: NextRebalance | None
+    last_signal_day: str | None
+    targets: list[TrendTarget]
+    holdings: list[Holding]
+    rebalances: list[TrendRebalanceRow]
+    fills: list[TrendFillRow]
+    funding_by_symbol: list[FundingBySymbol]
+    funding_recent: list[FundingRow]
+
+
+def next_trend_rebalance(now: datetime) -> dict:
+    """Next rebalance close (UTC date) whose run, 00:05 UTC the following day, is still ahead of `now`."""
+    today = now.astimezone(timezone.utc).date()
+    for k in range(-1, TREND_HOLD_DAYS + 1):
+        day = today + timedelta(days=k)
+        runs_at = datetime.combine(day + timedelta(days=1), time(0, 5), tzinfo=timezone.utc)
+        if (day - TREND_EPOCH).days % TREND_HOLD_DAYS == 0 and runs_at > now:
+            return {"signal_day": day.isoformat(), "runs_at": runs_at.isoformat()}
+    raise RuntimeError("no rebalance found within one cycle")
+
+
+def build_trend(acct: dict | None, live: dict | None, last_rebalance: dict | None, rebalances: list[dict],
+                fills: list[dict], funding: list[dict], last_cycle: str | None, now: datetime) -> dict:
+    """Trend bot detail view from its account row, live summary, rebalance/fill/funding rows."""
+    if not acct:
+        return {"running": False, "status": None, "next_rebalance": None, "last_signal_day": None, "targets": [],
+                "holdings": [], "rebalances": [], "fills": [], "funding_by_symbol": [], "funding_recent": []}
+    holdings = live["holdings"] if live else []
+    invested = sum(h["value_usd"] for h in holdings)
+    equity = live["trend"]["equity"] if live else acct["cash"] + invested
+    peak = max(acct["peak_equity"], equity)
+    by_symbol: dict[str, dict] = {}
+    for f in funding:
+        s = by_symbol.setdefault(f["symbol"], {"symbol": f["symbol"], "payments": 0, "amount_usdt": 0.0})
+        s["payments"] += 1
+        s["amount_usdt"] += f["amount_usdt"]
+    held = {h["symbol"]: h["weight_pct"] for h in holdings}
+    weights = (last_rebalance or {}).get("targets") or {}
+    targets = [{"symbol": s, "signal": "long" if weights.get(s, 0) > 0 else "flat",
+                "target_pct": weights.get(s, 0.0) * 100, "held_pct": held.get(s, 0.0)} for s in TREND_MAJORS]
+    status = {
+        "state": "halted" if acct["halted"] else "running", "halted_reason": acct["halted_reason"],
+        "started_at": acct["started_at"], "last_cycle": last_cycle, "start_capital": acct["start_capital"],
+        "equity": equity, "cash": acct["cash"], "invested": invested,
+        "invested_pct": invested / equity * 100 if equity else 0.0,
+        "return_pct": (equity / acct["start_capital"] - 1) * 100 if acct["start_capital"] else 0.0,
+        "peak_equity": peak, "drawdown_pct": (equity / peak - 1) * 100 if peak else 0.0,
+        "kill_drawdown_pct": -TREND_KILL_DRAWDOWN * 100, "kill_equity": peak * (1 - TREND_KILL_DRAWDOWN),
+        "funding_paid": sum(f["amount_usdt"] for f in funding),
+    }
+    return {"running": True, "status": status, "next_rebalance": next_trend_rebalance(now),
+            "last_signal_day": (last_rebalance or {}).get("signal_day"), "targets": targets, "holdings": holdings,
+            "rebalances": rebalances,
+            "fills": [{**f, "notional": f["qty"] * f["fill_price"]} for f in fills],
+            "funding_by_symbol": sorted(by_symbol.values(), key=lambda s: s["amount_usdt"], reverse=True),
+            "funding_recent": sorted(funding, key=lambda f: f["time"], reverse=True)[:50]}
+
+
+def _iso(v) -> str | None:
+    return v.isoformat() if hasattr(v, "isoformat") else v
+
+
+@router.get("/trend", response_model=TrendDetail)
+async def trend_detail(session: Annotated[AsyncSession, Depends(get_session)]):
+    now = datetime.now(timezone.utc)
+    if not await _table_exists(session, "trend_account"):
+        return build_trend(None, None, None, [], [], [], None, now)
+    acct = (await session.execute(text(
+        "SELECT start_capital, cash, peak_equity, halted, halted_reason, started_at FROM trend_account WHERE id = 1"
+    ))).mappings().first()
+    if not acct:
+        return build_trend(None, None, None, [], [], [], None, now)
+    acct = {**acct, "started_at": _iso(acct["started_at"])}
+    rebal = [{**r, "executed_at": _iso(r["executed_at"])} for r in (await session.execute(text(
+        "SELECT signal_day, executed_at, equity_before, orders, targets FROM trend_rebalances ORDER BY signal_day DESC"
+    ))).mappings().all()]
+    fills = [{**r, "time": _iso(r["time"])} for r in (await session.execute(text(
+        "SELECT time, symbol, side, qty, fill_price, fee_usdt, reason FROM trend_fills ORDER BY time DESC, id DESC LIMIT 500"
+    ))).mappings().all()]
+    funding = [{**r, "time": _iso(r["time"])} for r in (await session.execute(text(
+        "SELECT time, symbol, rate, amount_usdt FROM trend_funding ORDER BY time"))).mappings().all()]
+    redis = await _redis()
+    try:
+        raw, last_cycle = await redis.get(SUMMARY_KEY), await redis.get("trend:last_cycle")
+    finally:
+        await redis.aclose()
+    last = rebal[0] if rebal else None
+    if last and isinstance(last["targets"], str):
+        last = {**last, "targets": json.loads(last["targets"])}
+    rows = [{k: r[k] for k in ("signal_day", "executed_at", "equity_before", "orders")} for r in rebal]
+    return build_trend(dict(acct), json.loads(raw) if raw else None, last, rows, fills, funding, last_cycle, now)
 
 
 @router.get("/{key}", response_model=ResearchSet)

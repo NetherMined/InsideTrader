@@ -3,7 +3,7 @@ import type {
   BotStatus, Backtest, LivePrice, Candle,
   TradeLimits, PnlPeriodStats, ModeBreakdown,
   AccountBalances, LiveMode, MarketSentiment, StartupStatus,
-  ResearchMeta, ResearchSet, Comparison,
+  ResearchMeta, ResearchSet, Comparison, TrendDetail,
 } from './types';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -91,6 +91,7 @@ export const api = {
   research: () => get<ResearchMeta[]>('/api/v1/research'),
   researchSet: (key: string) => get<ResearchSet>(`/api/v1/research/${encodeURIComponent(key)}`),
   comparison: () => get<Comparison>('/api/v1/research/comparison'),
+  trend: () => get<TrendDetail>('/api/v1/research/trend'),
 };
 
 export const WS_URL = BASE.replace(/^http/, 'ws') + '/ws/prices';

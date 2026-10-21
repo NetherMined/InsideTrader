@@ -275,3 +275,34 @@ export interface Comparison {
   daily: ComparisonPoint[];
   holdings: TrendHolding[];
 }
+
+export interface TrendStatus {
+  state: 'running' | 'halted';
+  halted_reason: string | null;
+  started_at: string | null;
+  last_cycle: string | null;
+  start_capital: number;
+  equity: number;
+  cash: number;
+  invested: number;
+  invested_pct: number;
+  return_pct: number;
+  peak_equity: number;
+  drawdown_pct: number;
+  kill_drawdown_pct: number;
+  kill_equity: number;
+  funding_paid: number;
+}
+
+export interface TrendDetail {
+  running: boolean;
+  status: TrendStatus | null;
+  next_rebalance: { signal_day: string; runs_at: string } | null;
+  last_signal_day: string | null;
+  targets: { symbol: string; signal: 'long' | 'flat'; target_pct: number; held_pct: number }[];
+  holdings: TrendHolding[];
+  rebalances: { signal_day: string; executed_at: string; equity_before: number; orders: number }[];
+  fills: { time: string; symbol: string; side: string; qty: number; fill_price: number; notional: number; fee_usdt: number; reason: string }[];
+  funding_by_symbol: { symbol: string; payments: number; amount_usdt: number }[];
+  funding_recent: { time: string; symbol: string; rate: number; amount_usdt: number }[];
+}

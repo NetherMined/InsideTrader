@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
-import type { Comparison } from '@/lib/types';
+import type { Comparison, TrendDetail } from '@/lib/types';
 import { C, type Row } from '@/components/test-results/ui';
 import { OverviewTab } from '@/components/test-results/OverviewTab';
 import { HistoryTab } from '@/components/test-results/HistoryTab';
@@ -10,6 +10,7 @@ import { BotTab } from '@/components/test-results/BotTab';
 import { StrategiesTab } from '@/components/test-results/StrategiesTab';
 import { DayTradeTab } from '@/components/test-results/DayTradeTab';
 import { SideBySideTab } from '@/components/test-results/SideBySideTab';
+import { TrendBotTab } from '@/components/test-results/TrendBotTab';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -18,11 +19,12 @@ const TABS = [
   { id: 'strategies', label: 'Strategy research' },
   { id: 'daytrade', label: 'Day-trading setups' },
   { id: 'side-by-side', label: 'Side-by-side test' },
+  { id: 'trend-bot', label: 'Trend bot' },
 ] as const;
 type TabId = (typeof TABS)[number]['id'];
 
 const SETS = ['phases', 'bot_exits', 'bot_daily', 'exit_replay', 'signal_scan', 'horizon_scan',
-  'daily_strategies', 'robustness', 'equity_curves', 'daytrade_setups'];
+  'daily_strategies', 'robustness', 'equity_curves', 'daytrade_setups', 'trade_fixes_replay'];
 
 export default function TestResultsPage() {
   const [tab, setTab] = useState<TabId>('overview');
@@ -31,6 +33,8 @@ export default function TestResultsPage() {
   const [error, setError] = useState<string | null>(null);
   const [comparison, setComparison] = useState<Comparison | null>(null);
   const [cmpError, setCmpError] = useState<string | null>(null);
+  const [trend, setTrend] = useState<TrendDetail | null>(null);
+  const [trendError, setTrendError] = useState<string | null>(null);
 
   useEffect(() => {
     const hash = window.location.hash.slice(1);
@@ -46,8 +50,10 @@ export default function TestResultsPage() {
   }, []);
 
   useEffect(() => {
-    const load = () => api.comparison().then((c) => { setComparison(c); setCmpError(null); })
-      .catch((e: Error) => setCmpError(e.message));
+    const load = () => {
+      api.comparison().then((c) => { setComparison(c); setCmpError(null); }).catch((e: Error) => setCmpError(e.message));
+      api.trend().then((t) => { setTrend(t); setTrendError(null); }).catch((e: Error) => setTrendError(e.message));
+    };
     load();
     const t = setInterval(load, 60_000);
     return () => clearInterval(t);
@@ -81,7 +87,7 @@ export default function TestResultsPage() {
       </nav>
 
       {error && <p className="text-xs" style={{ color: C.loss }}>{error}</p>}
-      {loading && tab !== 'side-by-side'
+      {loading && tab !== 'side-by-side' && tab !== 'trend-bot'
         ? <p className="text-sm" style={{ color: C.muted }}>Loading test results…</p>
         : (
           <div role="tabpanel">
@@ -91,6 +97,7 @@ export default function TestResultsPage() {
             {tab === 'strategies' && <StrategiesTab sets={sets} />}
             {tab === 'daytrade' && <DayTradeTab rows={sets.daytrade_setups ?? []} />}
             {tab === 'side-by-side' && <SideBySideTab data={comparison} error={cmpError} plan={plan} />}
+            {tab === 'trend-bot' && <TrendBotTab data={trend} error={trendError} />}
           </div>
         )}
     </div>
