@@ -537,6 +537,7 @@ async def _check_and_close_positions(redis: aioredis.Redis, risk: RiskManager, p
             # Round-trip taker fee (open + close)
             estimated_fee = closed.fee_usdt
             await risk.record_fee(estimated_fee)
+            await risk.record_gross_pnl(closed.raw_pct, closed.gross_usdt)
 
             await close_position(
                 pos_id, symbol, exit_price, pnl_usdt, effective_pnl_pct, close_reason,
@@ -978,6 +979,7 @@ async def _try_open_trade(
         entry_price=fill_price, quantity=quantity,
         stop_loss_price=stop_loss, take_profit_price=take_profit,
         leverage=leverage, paper_trade=paper, binance_order_id=order_id,
+        funding_rate=(funding_rates or {}).get(symbol, {}).get("funding_rate", 0.0),
         regime=regime_result.regime if regime_result else "UNKNOWN",
         entry_indicators=entry_indicators,
     )
@@ -1068,6 +1070,7 @@ async def _maybe_switch_trade(
     pnl_usdt = closed.net_usdt
     estimated_fee = closed.fee_usdt
     await risk.record_fee(estimated_fee)
+    await risk.record_gross_pnl(closed.raw_pct, closed.gross_usdt)
 
     await close_position(
         pos_id, symbol, exit_price, pnl_usdt, effective_pnl_pct, "trade_switch",
@@ -1272,12 +1275,11 @@ async def run_trading_engine(
             if _loop_count % _ML_LEARN_INTERVAL == 0:
                 await _update_futures_buy_gate(redis)
 
-            # Fetch funding rates periodically (every 60s = ~12 loops)
+            # Funding rates every loop from the 5-minute cache, so every new trade sees them
             funding_rates = {}
-            if _loop_count % 12 == 0:
-                all_symbols = [p.symbol for p in ranked_store.get("pairs", [])]
-                if all_symbols:
-                    funding_rates = await _fetch_funding_rates_cached(redis, all_symbols)
+            all_symbols = [p.symbol for p in ranked_store.get("pairs", [])]
+            if all_symbols:
+                funding_rates = await _fetch_funding_rates_cached(redis, all_symbols)
 
             # Regime is now detected per-symbol inside _try_open_trade (not once for all)
 

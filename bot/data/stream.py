@@ -13,6 +13,7 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from bot.config import settings
+from bot.redis_conn import make_redis
 
 POLL_INTERVAL = 10
 PRICE_TTL = 60
@@ -23,11 +24,7 @@ def _make_exchange() -> ccxt.binance:
 
 
 async def _get_redis() -> aioredis.Redis:
-    return await aioredis.from_url(
-        settings.redis_url,
-        encoding="utf-8",
-        decode_responses=True,
-    )
+    return make_redis(settings.redis_url)
 
 
 async def poll_prices(pairs: list[str], stop_event: asyncio.Event) -> None:

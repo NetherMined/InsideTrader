@@ -21,6 +21,7 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from bot.config import settings
+from bot.redis_conn import make_redis
 from bot.db.connection import init_db, check_db
 from bot.tools.baseline import daily_baseline
 from bot.analysis.path_model import daily_path_training
@@ -96,7 +97,7 @@ async def startup_checks() -> None:
 
 def _make_redis() -> aioredis.Redis:
     url = settings.redis_url
-    return aioredis.from_url(url, encoding="utf-8", decode_responses=True)
+    return make_redis(url)
 
 
 def _refresh_minutes() -> int:

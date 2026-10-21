@@ -65,6 +65,8 @@ class RiskManager:
             await self._redis.set(KILL_KEY, "0")
             await self._redis.set(DEFENSIVE_KEY, "0")
             await self._redis.set(DAILY_TRADE_COUNT_KEY, "0")
+            await self._redis.set(FEES_KEY, "0.0")
+            await self._redis.set(GROSS_PNL_KEY, "0.0")
             logger.info(f"New trading day: {today} — daily stats reset")
 
     async def get_daily_pnl(self) -> float:
@@ -245,13 +247,16 @@ class RiskManager:
         """Record closed trade P&L. Returns True if kill switch was triggered."""
         await self._reset_if_new_day()
 
-        val = float(await self._redis.get(DAILY_PNL_KEY) or 0.0)
-        new_val = val + pnl_pct
-        await self._redis.set(DAILY_PNL_KEY, str(new_val))
-
         usdt_val = float(await self._redis.get(DAILY_PNL_USDT_KEY) or 0.0)
         new_usdt_val = usdt_val + pnl_usdt
         await self._redis.set(DAILY_PNL_USDT_KEY, str(new_usdt_val))
+
+        # Daily % is measured against capital, not a sum of per-trade leveraged returns
+        if capital_usdt > 0:
+            new_val = new_usdt_val / capital_usdt * 100
+        else:
+            new_val = float(await self._redis.get(DAILY_PNL_KEY) or 0.0) + pnl_pct
+        await self._redis.set(DAILY_PNL_KEY, str(new_val))
 
         await self._redis.rpush(TRADE_RETURNS_KEY, str(pnl_pct))
         await self._redis.ltrim(TRADE_RETURNS_KEY, -500, -1)
@@ -287,8 +292,8 @@ class RiskManager:
         val = float(await self._redis.get(FEES_KEY) or 0.0)
         await self._redis.set(FEES_KEY, str(val + fee_usdt))
 
-        gross = float(await self._redis.get(GROSS_PNL_KEY) or 0.0)
-        await self._redis.set(GROSS_PNL_KEY, str(gross + fee_usdt))  # Track gross as PnL+fees
+        total = float(await self._redis.get(TOTAL_FEES_KEY) or 0.0)
+        await self._redis.set(TOTAL_FEES_KEY, str(total + fee_usdt))
 
     async def record_gross_pnl(self, pnl_pct: float, pnl_usdt: float) -> None:
         """Record gross P&L before fees for net/gross comparison."""

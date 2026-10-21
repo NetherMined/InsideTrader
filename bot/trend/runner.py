@@ -16,13 +16,13 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
-import redis.asyncio as aioredis
 from loguru import logger
 from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from bot.config import settings
+from bot.redis_conn import make_redis
 from bot.db.connection import async_session, engine
 from bot.db.models import (
     Base, StrategyEquity, TrendAccount, TrendFill, TrendFunding, TrendPosition, TrendRebalance,
@@ -192,7 +192,7 @@ def _next_run(now: datetime) -> datetime:
 
 async def main(once: bool = False, resume: bool = False) -> None:
     await ensure_tables()
-    redis = aioredis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+    redis = make_redis(settings.redis_url)
     if resume:
         async with async_session() as session:
             acct = await session.get(TrendAccount, 1)

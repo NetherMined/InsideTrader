@@ -187,13 +187,23 @@ async def place_futures_market_close(symbol: str, quantity: float, use_testnet: 
             pass
 
 
-async def get_current_price(symbol: str) -> float | None:
-    exchange = ccxt.binance({"options": {"defaultType": "spot"}})
+async def _fetch_last_price(default_type: str, symbol: str) -> float:
+    exchange = ccxt.binance({"options": {"defaultType": default_type}})
     try:
         ticker = await exchange.fetch_ticker(symbol)
         return float(ticker["last"])
-    except Exception as e:
-        logger.warning(f"Price fetch failed for {symbol}: {e}")
-        return None
     finally:
         await exchange.close()
+
+
+async def get_current_price(symbol: str) -> float | None:
+    """Last price from spot, falling back to the USDT perpetual for futures-only coins."""
+    try:
+        return await _fetch_last_price("spot", symbol)
+    except Exception as spot_err:
+        perp = symbol if ":" in symbol else f"{symbol}:USDT"
+        try:
+            return await _fetch_last_price("future", perp)
+        except Exception as fut_err:
+            logger.warning(f"Price fetch failed for {symbol}: spot: {spot_err} | futures: {fut_err}")
+            return None

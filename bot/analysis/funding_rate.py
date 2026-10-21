@@ -13,18 +13,11 @@ Negative = shorts pay longs.
 import ccxt.async_support as ccxt
 from loguru import logger
 
-from bot.config import settings
 
 
 def _make_exchange() -> ccxt.binance:
-    exchange = ccxt.binance({
-        "apiKey": settings.order_api_key,
-        "secret": settings.order_api_secret,
-        "options": {"defaultType": "future"},
-    })
-    if settings.use_testnet:
-        exchange.set_sandbox_mode(True)
-    return exchange
+    # Funding rates are public market data: always read the real futures market, even when orders go to testnet
+    return ccxt.binance({"options": {"defaultType": "future"}})
 
 
 async def fetch_funding_rates(symbols: list[str]) -> dict[str, dict]:
