@@ -95,6 +95,23 @@ export function BotTab({ sets }: { sets: Record<string, Row[]> }) {
           ]} />
       </Card>
 
+      <Card title="Live trade replay: exits and filters (Phase 7)"
+        note="The 185 paper trades from Oct 14–21 replayed with their real entries, stops, targets and sizes. The current rules reproduce 84% of the real exits. Filters only remove trades, so they lose fewer dollars just by trading less; compare net per trade. A change passes only if its net per trade beats the current rules in both halves of the week.">
+        <DataTable<Row> rows={sets.trade_fixes_replay ?? []} rowKey={(r) => String(r.test)}
+          highlight={(r) => r.test === 'A. Current rules'} cols={[
+            { key: 'test', label: 'Change' },
+            { key: 'trades', label: 'Trades', render: (r) => int(r.trades) },
+            { key: 'net_usd', label: 'Net', render: (r) => usd(r.net_usd), color: (r) => tone(r.net_usd) },
+            { key: 'per_trade_usd', label: 'Per trade', render: (r) => usd(r.per_trade_usd), color: (r) => tone(r.per_trade_usd) },
+            { key: 'win_pct', label: 'Win rate', render: (r) => plainPct(r.win_pct) },
+            { key: 'avg_win_usd', label: 'Avg win', render: (r) => usd(r.avg_win_usd) },
+            { key: 'avg_loss_usd', label: 'Avg loss', render: (r) => usd(r.avg_loss_usd) },
+            { key: 'first_half_per_trade', label: '1st half / trade', render: (r) => usd(r.first_half_per_trade), color: (r) => tone(r.first_half_per_trade) },
+            { key: 'second_half_per_trade', label: '2nd half / trade', render: (r) => usd(r.second_half_per_trade), color: (r) => tone(r.second_half_per_trade) },
+            { key: 'beats_control_both_halves', label: 'Passes', render: (r) => (r.beats_control_both_halves ? 'Yes' : 'No') },
+          ]} />
+      </Card>
+
       <Card title="Signal scan (Phase 3)"
         note="Each row is a group of researcher packets, ML predictions or real trades. Hit rate is how often price moved the predicted way; 'vs drift' removes the effect of the market simply falling. Net subtracts the 13 bps (0.13%) round-trip cost.">
         <Explorer rows={sets.signal_scan ?? []} />

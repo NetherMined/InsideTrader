@@ -3,7 +3,7 @@
  "title": "Testing history",
  "description": "Each research phase: the question, method, finding and decision.",
  "phase": "All",
- "updated_at": "2026-10-17",
+ "updated_at": "2026-10-21",
  "rows": [
   {
    "order": 1,
@@ -103,6 +103,17 @@
    "method": "Trend strategy runs as its own paper bot (separate service and tables) next to the unchanged current bot. Both started from $511.82, the current bot's equity at launch. The trend bot checks funding and stops hourly and rebalances every 5 days; a snapshot of both balances is taken daily.",
    "finding": "Started Oct 16, 22:41 UTC. Initial rebalance on the Oct 15 close: 7 longs (BTC, SOL, XRP, ADA, LINK, LTC, AVAX), about 42% of equity. First scheduled rebalance on the Oct 17 close. Results will be added here weekly.",
    "decision": "Review after 6 to 8 weeks (8 to 11 rebalances)."
+  },
+  {
+   "order": 10,
+   "date": "2026-10-21",
+   "phase": "Phase 7",
+   "name": "Live trade review and exit/filter replay",
+   "status": "Done",
+   "question": "Why does the bot lose with a 55% win rate, and would a later trailing stop, no trailing stop, a coin-swing filter or a BTC-trend side filter fix it?",
+   "method": "Reviewed the 184 paper trades from Oct 14-21, fixed the daily P&L, fee, price and funding bugs found, then replayed 185 trades on 1-minute candles with their real entries, stops, targets and sizes. The current rules reproduce 84% of real exit reasons and -$13.87 vs -$12.92 actual. A change had to beat the current net per trade in both halves of the week.",
+   "finding": "Losses come from the shape of the exits: the trailing stop banks about +0.7% while stop-losses take about -1.2%, and fees ($11.89) are the whole loss. Starting the trail later than +0.9% changes nothing because a trail exit already needs a 0.9% peak (0.4% minimum + 0.5% pullback); +1.0% is slightly worse. No trailing stop wins bigger but far less often (33%) and loses more overall. Trading only coins whose normal hourly swing is within the stop distance (71 of 185 trades) loses less per trade (-$0.053 vs -$0.075) in both halves but is still negative. Following BTC's trend for the side is worse per trade.",
+   "decision": "No variant makes the bot profitable, so the live exit rules stay as they are. The coin-swing filter is the only change that helped in both halves; applying it cuts losses by trading less, not by adding an edge."
   }
  ]
 }

@@ -75,6 +75,12 @@ times and sides. Compare each variant against the current rules on net P&L, win 
 Only if a Phase 3 variant passes. Change the matching settings in `bot/config.py` (and Redis where live-switchable)
 and record the change in the testing history. If nothing passes, record that and leave the live rules as they are.
 
+## Outcome (Oct 21)
+
+- Phases 1–2 done (commit beedf37). Phase 3 done: no variant makes the bot profitable; only the coin-swing filter
+  beat the current rules per trade in both halves (-$0.053 vs -$0.075) and it still loses.
+- Phase 4: live exit rules left unchanged by decision. Recorded as Phase 7 in the testing history.
+
 ## Out of scope
 
 - Telegram 403: the bot was blocked in Telegram by the user; this needs unblocking in Telegram, not code.

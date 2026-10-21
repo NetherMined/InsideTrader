@@ -56,6 +56,7 @@ class Rules:
     leverage: int
     trail_min_raw_pct: float
     trail_reversal_raw_pct: float = settings.trail_reversal_raw_pct
+    trail_activation_raw_pct: float | None = None  # None = live rule (1% on margin / leverage)
     inv_side_check: bool = True
     inv_min_hold_min: float = settings.invalidation_min_hold_minutes
     inv_buffer_pct: float = settings.invalidation_buffer_pct
@@ -137,6 +138,7 @@ def simulate(
     sign = 1.0 if side == "BUY" else -1.0
     max_raw_loss = 3.8 / max(lev, 1)
     trail_raw = rules.trail_reversal_raw_pct
+    trail_act = rules.trail_activation_raw_pct if rules.trail_activation_raw_pct is not None else _TRAIL_ACTIVATION_PCT / max(lev, 1)
     peak: float | None = None
     mfe15 = mae15 = 0.0
     t0 = candles.t[i0]
@@ -165,7 +167,7 @@ def simulate(
                 exit_quote, exit_reason, done = take_profit, "take_profit", True
                 break
             # Trailing stop
-            if raw * lev >= _TRAIL_ACTIVATION_PCT:
+            if raw >= trail_act:
                 peak = p if peak is None else (max(peak, p) if side == "BUY" else min(peak, p))
             if peak is not None:
                 trigger = peak * (1 - trail_raw / 100) if side == "BUY" else peak * (1 + trail_raw / 100)
